@@ -2,7 +2,28 @@ cmake_minimum_required(VERSION 3.21)
 project(SerialScope VERSION 1.0.0 LANGUAGES CXX)
 
 if(WIN32)
+    # Keep clean MinGW builds working even when the toolchain directory is not
+    # on PATH: locate windres next to the configured C++ compiler.
+    if(NOT CMAKE_RC_COMPILER OR NOT EXISTS "${CMAKE_RC_COMPILER}")
+        get_filename_component(_serialscope_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        find_program(SerialScope_WINDRES
+            NAMES windres
+            HINTS "${_serialscope_cxx_dir}"
+            NO_DEFAULT_PATH
+        )
+        if(SerialScope_WINDRES)
+            set(CMAKE_RC_COMPILER "${SerialScope_WINDRES}" CACHE FILEPATH
+                "Windows resource compiler" FORCE)
+        endif()
+    endif()
     enable_language(RC)
+    # CMake's generated RC rule can invoke a bare "windres" even when the
+    # compiler was found by absolute path; pin the rule to the detected tool.
+    if(SerialScope_WINDRES)
+        set(CMAKE_RC_COMPILER "${SerialScope_WINDRES}")
+        set(CMAKE_RC_COMPILE_OBJECT
+            "\"${SerialScope_WINDRES}\" -O coff <DEFINES> <INCLUDES> <FLAGS> <SOURCE> <OBJECT>")
+    endif()
 endif()
 
 set(CMAKE_CXX_STANDARD 17)

@@ -141,7 +141,9 @@ cmake --build build --parallel
 ```
 
 Linux 需要系统提供 Qt 6 SerialPort 模块；macOS 可使用 `macdeployqt` 打包应用包。
-Windows 的 EXE 图标与版本资源由 `resources/SerialScope.rc.in` 生成。
+Windows 的 EXE 图标与版本资源由 `resources/SerialScope.rc.in` 生成。CMake 会自动从
+C++ 编译器目录查找 `windres`；如果使用其他 MinGW 布局，可把其 `bin` 目录加入 PATH，
+或传入 `-DCMAKE_RC_COMPILER=<路径>/windres.exe`。
 
 ### 中文路径
 
