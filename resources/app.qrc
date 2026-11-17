@@ -1,0 +1,17 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file alias="icons/app-16.png">icons/app-16.png</file>
+        <file alias="icons/app-20.png">icons/app-20.png</file>
+        <file alias="icons/app-24.png">icons/app-24.png</file>
+        <file alias="icons/app-32.png">icons/app-32.png</file>
+        <file alias="icons/app-40.png">icons/app-40.png</file>
+        <file alias="icons/app-48.png">icons/app-48.png</file>
+        <file alias="icons/app-64.png">icons/app-64.png</file>
+        <file alias="icons/app-128.png">icons/app-128.png</file>
+        <file alias="icons/app-256.png">icons/app-256.png</file>
+        <file alias="icons/github-dark.png">icons/github-dark.png</file>
+        <file alias="icons/github-light.png">icons/github-light.png</file>
+        <file alias="licenses/GPL-3.0.txt">../LICENSE</file>
+    </qresource>
+</RCC>

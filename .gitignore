@@ -1,0 +1,22 @@
+# CMake / Qt build output
+build/
+build-*/
+out/
+dist/
+release/
+
+# IDE and user-specific files
+CMakeUserPresets.json
+*.user
+.qtcreator/
+.vscode/
+.idea/
+
+# Runtime and test output
+*.log
+test_*_out.txt
+ctest.log
+
+# OS metadata
+.DS_Store
+Thumbs.db

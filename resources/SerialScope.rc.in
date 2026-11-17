@@ -1,0 +1,28 @@
+IDI_ICON1 ICON "@CMAKE_CURRENT_SOURCE_DIR@/resources/icons/SerialScope.ico"
+
+1 VERSIONINFO
+FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "SerialScope Contributors"
+            VALUE "FileDescription", "SerialScope - Serial Port Debugger"
+            VALUE "FileVersion", "@PROJECT_VERSION@"
+            VALUE "InternalName", "SerialScope"
+            VALUE "LegalCopyright", "Copyright (C) 2026 SerialScope Contributors"
+            VALUE "OriginalFilename", "SerialScope.exe"
+            VALUE "ProductName", "SerialScope"
+            VALUE "ProductVersion", "@PROJECT_VERSION@"
+            VALUE "Comments", "GNU General Public License v3.0 only"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
