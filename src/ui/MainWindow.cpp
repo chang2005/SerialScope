@@ -10,6 +10,7 @@
 #include "ui/dialogs/AboutDialog.h"
 #include "ui/dialogs/AutoReplyDialog.h"
 #include "ui/dialogs/CrcToolDialog.h"
+#include "ui/dialogs/EncodingFixDialog.h"
 #include "utils/SettingsManager.h"
 
 #include <QAction>
@@ -216,6 +217,13 @@ void MainWindow::setupToolbar()
                               tr("CRC / 校验工具…"), this);
     connect(m_crcAction, &QAction::triggered, this, &MainWindow::showCrcTool);
     toolsMenu->addAction(m_crcAction);
+
+    m_encodingAction = new QAction(style()->standardIcon(QStyle::SP_FileDialogContentsView),
+                                   tr("编码转换 / 乱码修复…"), this);
+    m_encodingAction->setToolTip(
+        tr("在 GBK / UTF-8 / ASCII / Latin-1 之间转换，辅助修复编码不匹配造成的乱码"));
+    connect(m_encodingAction, &QAction::triggered, this, &MainWindow::showEncodingTool);
+    toolsMenu->addAction(m_encodingAction);
 
     m_autoReplyAction = new QAction(style()->standardIcon(QStyle::SP_BrowserReload),
                                     tr("自动回复规则…"), this);
@@ -575,6 +583,9 @@ void MainWindow::handleIncomingData(const QByteArray &data)
     if (m_logger)
         m_logger->appendRx(data); // 未记录时内部直接返回
 
+    // 轮发序列的「应答触发」模式：收到数据才发送下一条
+    m_sendPanel->onDataReceived();
+
     // 自动回复：收到匹配的数据后自动回一条预设内容
     if (m_autoReplyEnabled && !m_autoReplyRules.isEmpty()) {
         AutoReplyRule matched;
@@ -871,6 +882,12 @@ void MainWindow::toggleTheme(bool dark)
 void MainWindow::showCrcTool()
 {
     CrcToolDialog dialog(this);
+    dialog.exec();
+}
+
+void MainWindow::showEncodingTool()
+{
+    EncodingFixDialog dialog(this);
     dialog.exec();
 }
 

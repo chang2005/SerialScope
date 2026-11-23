@@ -87,6 +87,14 @@ QString portToolTip(const QSerialPortInfo &info)
         details << info.description();
     if (!info.manufacturer().isEmpty())
         details << QObject::tr("制造商：%1").arg(info.manufacturer());
+    // VID/PID：Windows 上很多设备拿不到，必须先判空，
+    // 否则会显示误导性的 "VID: 0000"。
+    if (info.hasVendorIdentifier() && info.hasProductIdentifier()) {
+        details << QObject::tr("VID:PID：%1:%2")
+                        .arg(info.vendorIdentifier(), 4, 16, QLatin1Char('0'))
+                        .arg(info.productIdentifier(), 4, 16, QLatin1Char('0'))
+                        .toUpper();
+    }
     if (!info.serialNumber().isEmpty())
         details << QObject::tr("序列号：%1").arg(info.serialNumber());
     if (!info.systemLocation().isEmpty())

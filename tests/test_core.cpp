@@ -1,8 +1,10 @@
 #include "core/AutoReply.h"
 #include "core/QuickSend.h"
+#include "core/SequenceSender.h"
 #include "core/parser/AsciiValueParser.h"
 #include "core/parser/ControlCharVisualizer.h"
 #include "core/parser/DataFrameParser.h"
+#include "core/parser/EncodingFixer.h"
 #include "core/parser/HexCodec.h"
 #include "core/parser/HexFieldExtractor.h"
 #include "core/parser/TextFilter.h"
@@ -20,12 +22,21 @@ class TestCore : public QObject
 private slots:
     void crcVectors();
     void crcAppendMode();
+    void crcLrcVector();
 
     void hexParsing();
     void hexFormatting();
     void hexDecodeAscii();
     void hexDecodeUtf8Incremental();
     void hexGbkRoundTrip();
+
+    void encodingFixUtf8ToGbk();
+    void encodingFixLatin1RoundTrip();
+    void encodingCandidatesRankByReadability();
+    void encodingCandidatesPreferUtf8ForUtf8Bytes();
+    void encodingValidUtf8RejectsGbkBytes();
+    void encodingReadabilityPenalizesGarbage();
+    void encodingFixDetectsUtf8BytesAsGbk();
 
     void asciiParserBasic();
     void asciiParserSplitLine();
@@ -38,6 +49,11 @@ private slots:
     void frameParserPartialHeaderAcrossChunks();
     void frameParserCrcFixedWithHeader();
     void frameParserCrcFixedNoHeader();
+    void frameParserLrcChecksum();
+    void frameParserXorChecksum();
+    void frameParserCcittChecksum();
+    void frameParserFixedTail();
+    void frameParserTailMismatch();
 
     void fieldExtractorLittleEndian();
     void fieldExtractorBigEndian();
@@ -65,6 +81,14 @@ private slots:
     void autoReplyEscapes();
     void autoReplyHexPayload();
     void autoReplyJsonRoundTrip();
+
+    void sequenceSetAddUpdateRemove();
+    void sequenceSetRejectsEmptyGroup();
+    void sequenceSetJsonRoundTrip();
+    void sequenceRunnerWalksItemsThenGroups();
+    void sequenceRunnerLoopsBackToFirstGroup();
+    void sequenceRunnerSkipsEmptyGroups();
+    void sequenceRunnerStartFailsWhenEmpty();
 };
 
 void TestCore::crcVectors()
@@ -106,9 +130,33 @@ void TestCore::crcAppendMode()
     QCOMPARE(static_cast<quint8>(withSum.back()),
              CrcCalculator::sum8(payload));
 
+    const QByteArray withXor =
+        CrcCalculator::appendChecksum(payload, CrcCalculator::AppendMode::Xor8);
+    QCOMPARE(withXor.size(), payload.size() + 1);
+    QCOMPARE(static_cast<quint8>(withXor.back()),
+             CrcCalculator::xor8(payload));
+
+    const QByteArray withLrc =
+        CrcCalculator::appendChecksum(payload, CrcCalculator::AppendMode::Lrc8);
+    QCOMPARE(withLrc.size(), payload.size() + 1);
+    QCOMPARE(static_cast<quint8>(withLrc.back()),
+             CrcCalculator::lrc8(payload));
+
     const QByteArray unchanged =
         CrcCalculator::appendChecksum(payload, CrcCalculator::AppendMode::None);
     QCOMPARE(unchanged, payload);
+}
+
+void TestCore::crcLrcVector()
+{
+    // LRC = 各字节求和后取补码（Modbus ASCII）
+    const QByteArray check = QByteArrayLiteral("123456789");
+    const quint32 sum = 0x31 + 0x32 + 0x33 + 0x34 + 0x35 + 0x36 + 0x37 + 0x38 + 0x39;
+    QCOMPARE(static_cast<int>(CrcCalculator::lrc8(check)),
+             static_cast<int>((~sum + 1) & 0xFF));
+
+    // 空数据的 LRC 为 0
+    QCOMPARE(static_cast<int>(CrcCalculator::lrc8(QByteArray())), 0x00);
 }
 
 void TestCore::hexParsing()
@@ -183,6 +231,109 @@ void TestCore::hexGbkRoundTrip()
     QVERIFY(first.isEmpty());
     QCOMPARE(HexCodec::decode(gbk.mid(1), TextEncoding::Gbk, &state),
              QStringLiteral("串口调试"));
+}
+
+void TestCore::encodingFixUtf8ToGbk()
+{
+    if (!HexCodec::codecFor(TextEncoding::Gbk))
+        QSKIP("当前 Qt 构建不包含 GBK 编解码器");
+
+    // 设备发 UTF-8 字节，工具按 GBK 解读 → 乱码；再用 GBK→UTF-8 转回来应还原
+    const QString original = QStringLiteral("串口调试");
+    const QByteArray utf8Bytes = original.toUtf8();
+    const QString garbled = EncodingFixer::decodeBytes(utf8Bytes,
+                                                       EncodingFixer::Encoding::Gbk);
+    QVERIFY(garbled != original);
+
+    const QString fixed = EncodingFixer::fix(garbled, EncodingFixer::Encoding::Gbk,
+                                             EncodingFixer::Encoding::Utf8);
+    QCOMPARE(fixed, original);
+}
+
+void TestCore::encodingFixLatin1RoundTrip()
+{
+    // Latin-1 与字节一一对应，必须能无损往返
+    const QString text = QStringLiteral("ABC\r\n");
+    const QByteArray bytes = EncodingFixer::encodeText(text, EncodingFixer::Encoding::Latin1);
+    QCOMPARE(bytes.size(), text.size());
+    QCOMPARE(EncodingFixer::decodeBytes(bytes, EncodingFixer::Encoding::Latin1), text);
+    QCOMPARE(EncodingFixer::fix(text, EncodingFixer::Encoding::Latin1,
+                                EncodingFixer::Encoding::Latin1),
+             text);
+}
+
+void TestCore::encodingCandidatesRankByReadability()
+{
+    const QByteArray gbk = HexCodec::encode(QStringLiteral("串口调试"), TextEncoding::Gbk);
+    if (gbk.isEmpty())
+        QSKIP("当前环境不支持 GBK 编码");
+
+    const QVector<EncodingFixer::Candidate> candidates =
+        EncodingFixer::candidates(gbk);
+    QCOMPARE(candidates.size(), 4);
+
+    // 评分必须从高到低排列
+    for (int i = 1; i < candidates.size(); ++i)
+        QVERIFY(candidates.at(i - 1).score >= candidates.at(i).score);
+
+    // 正确的 GBK 解码应排在第一，且没有替换字符
+    QCOMPARE(candidates.first().encoding, EncodingFixer::Encoding::Gbk);
+    QCOMPARE(candidates.first().replacementChars, 0);
+    QCOMPARE(candidates.first().text, QStringLiteral("串口调试"));
+}
+
+void TestCore::encodingCandidatesPreferUtf8ForUtf8Bytes()
+{
+    const QByteArray utf8Bytes = QStringLiteral("串口调试").toUtf8();
+    QVERIFY(EncodingFixer::isValidUtf8(utf8Bytes));
+
+    const QVector<EncodingFixer::Candidate> candidates =
+        EncodingFixer::candidates(utf8Bytes);
+    QCOMPARE(candidates.size(), 4);
+    QCOMPARE(candidates.first().encoding, EncodingFixer::Encoding::Utf8);
+    QCOMPARE(candidates.first().text, QStringLiteral("串口调试"));
+    QCOMPARE(candidates.first().replacementChars, 0);
+}
+
+void TestCore::encodingValidUtf8RejectsGbkBytes()
+{
+    // GBK 的中文字节对不是合法 UTF-8，这是区分两种编码的关键依据
+    const QByteArray gbk = HexCodec::encode(QStringLiteral("串口调试"), TextEncoding::Gbk);
+    if (gbk.isEmpty())
+        QSKIP("当前环境不支持 GBK 编码");
+    QVERIFY(!EncodingFixer::isValidUtf8(gbk));
+
+    // 纯 ASCII 同时是合法的 UTF-8
+    QVERIFY(EncodingFixer::isValidUtf8(QByteArray("hello world")));
+    QVERIFY(EncodingFixer::isValidUtf8(QByteArray()));
+    // 非法续字节
+    QVERIFY(!EncodingFixer::isValidUtf8(QByteArray::fromHex("80")));
+    // 过长编码
+    QVERIFY(!EncodingFixer::isValidUtf8(QByteArray::fromHex("C0AF")));
+    // 截断的多字节序列
+    QVERIFY(!EncodingFixer::isValidUtf8(QByteArray::fromHex("E4B8")));
+}
+
+void TestCore::encodingReadabilityPenalizesGarbage()
+{
+    int replacements = 0;
+    const int good = EncodingFixer::readabilityScore(QStringLiteral("hello 中文"), &replacements);
+    QCOMPARE(replacements, 0);
+
+    const int bad = EncodingFixer::readabilityScore(QStringLiteral("���"), &replacements);
+    QCOMPARE(replacements, 3);
+    QVERIFY(bad < good);
+}
+
+void TestCore::encodingFixDetectsUtf8BytesAsGbk()
+{
+    // UTF-8 字节被当作 GBK 解读时会变成可打印但无意义的字符，
+    // 换成 UTF-8 解读后应恢复正常且评分更高。
+    const QByteArray utf8Bytes = QStringLiteral("温度25").toUtf8();
+    const auto gbkCandidate = EncodingFixer::decodeWith(utf8Bytes, EncodingFixer::Encoding::Gbk);
+    const auto utf8Candidate = EncodingFixer::decodeWith(utf8Bytes, EncodingFixer::Encoding::Utf8);
+    QCOMPARE(utf8Candidate.text, QStringLiteral("温度25"));
+    QVERIFY(utf8Candidate.replacementChars <= gbkCandidate.replacementChars);
 }
 
 void TestCore::asciiParserBasic()
@@ -354,7 +505,7 @@ void TestCore::frameParserCrcFixedWithHeader()
     spec.header = QByteArray::fromHex("AA55");
     spec.lengthMode = FrameSpec::LengthMode::Fixed;
     spec.fixedFrameLength = 8;
-    spec.verifyCrc16Modbus = true;
+    spec.checksum = FrameChecksum::Crc16Modbus;
 
     DataFrameParser parser;
     parser.setSpec(spec);
@@ -388,7 +539,7 @@ void TestCore::frameParserCrcFixedNoHeader()
     spec.header.clear();
     spec.lengthMode = FrameSpec::LengthMode::Fixed;
     spec.fixedFrameLength = 8;
-    spec.verifyCrc16Modbus = true;
+    spec.checksum = FrameChecksum::Crc16Modbus;
 
     DataFrameParser parser;
     parser.setSpec(spec);
@@ -412,6 +563,153 @@ void TestCore::frameParserCrcFixedNoHeader()
     bad[0] = static_cast<char>(bad.at(0) ^ 0xFF);
     parser.feed(bad);
     QCOMPARE(frames.size(), 1);
+    QVERIFY(discarded > 0);
+}
+
+void TestCore::frameParserLrcChecksum()
+{
+    FrameSpec spec;
+    spec.header = QByteArray::fromHex("AA55");
+    spec.lengthMode = FrameSpec::LengthMode::Fixed;
+    spec.fixedFrameLength = 6; // 帧头 2 + 数据 3 + LRC 1
+    spec.checksum = FrameChecksum::Lrc8;
+
+    DataFrameParser parser;
+    parser.setSpec(spec);
+
+    QVector<QByteArray> frames;
+    int discarded = 0;
+    parser.onFrame = [&frames](const QByteArray &frame) { frames.append(frame); };
+    parser.onBytesDiscarded = [&discarded](int bytes) { discarded += bytes; };
+
+    const QByteArray payload = QByteArray::fromHex("AA55010203");
+    QByteArray good = payload;
+    good.append(static_cast<char>(CrcCalculator::lrc8(payload)));
+    QCOMPARE(good.size(), 6);
+
+    parser.feed(good);
+    QCOMPARE(frames.size(), 1);
+    QCOMPARE(frames.at(0), good);
+
+    QByteArray bad = good;
+    bad[3] = static_cast<char>(bad.at(3) ^ 0x33);
+    parser.feed(bad);
+    QCOMPARE(frames.size(), 1);
+    QVERIFY(discarded > 0);
+}
+
+void TestCore::frameParserXorChecksum()
+{
+    FrameSpec spec;
+    spec.header = QByteArray::fromHex("AA55");
+    spec.lengthMode = FrameSpec::LengthMode::Fixed;
+    spec.fixedFrameLength = 6; // 帧头 2 + 数据 3 + Xor 1
+    spec.checksum = FrameChecksum::Xor8;
+
+    DataFrameParser parser;
+    parser.setSpec(spec);
+
+    QVector<QByteArray> frames;
+    parser.onFrame = [&frames](const QByteArray &frame) { frames.append(frame); };
+
+    const QByteArray payload = QByteArray::fromHex("AA55010203");
+    QByteArray good = payload;
+    good.append(static_cast<char>(CrcCalculator::xor8(payload)));
+
+    parser.feed(good);
+    QCOMPARE(frames.size(), 1);
+    QCOMPARE(frames.at(0), good);
+}
+
+void TestCore::frameParserCcittChecksum()
+{
+    FrameSpec spec;
+    spec.header = QByteArray::fromHex("AA55");
+    spec.lengthMode = FrameSpec::LengthMode::Fixed;
+    spec.fixedFrameLength = 8;
+    spec.checksum = FrameChecksum::Crc16Ccitt;
+
+    DataFrameParser parser;
+    parser.setSpec(spec);
+
+    QVector<QByteArray> frames;
+    parser.onFrame = [&frames](const QByteArray &frame) { frames.append(frame); };
+
+    const QByteArray payload = QByteArray::fromHex("AA5501020304");
+    const quint16 crc = CrcCalculator::crc16CcittFalse(payload);
+    QByteArray good = payload;
+    good.append(static_cast<char>((crc >> 8) & 0xFF)); // CCITT 高字节在前
+    good.append(static_cast<char>(crc & 0xFF));
+
+    parser.feed(good);
+    QCOMPARE(frames.size(), 1);
+    QCOMPARE(frames.at(0), good);
+
+    // 小端排列不应被接受
+    QByteArray littleEndian = payload;
+    littleEndian.append(static_cast<char>(crc & 0xFF));
+    littleEndian.append(static_cast<char>((crc >> 8) & 0xFF));
+    parser.feed(littleEndian);
+    QCOMPARE(frames.size(), 1);
+}
+
+void TestCore::frameParserFixedTail()
+{
+    FrameSpec spec;
+    spec.header = QByteArray::fromHex("AA55");
+    spec.lengthMode = FrameSpec::LengthMode::Fixed;
+    spec.fixedFrameLength = 9; // 帧头 2 + 数据 3 + CRC16 2 + 帧尾 2
+    spec.checksum = FrameChecksum::Crc16Modbus;
+    spec.tail = QByteArray::fromHex("0D0A");
+    spec.tailMode = FrameTailMode::Fixed;
+
+    DataFrameParser parser;
+    parser.setSpec(spec);
+
+    QVector<QByteArray> frames;
+    parser.onFrame = [&frames](const QByteArray &frame) { frames.append(frame); };
+
+    // 帧内结构：[帧头][数据][校验][帧尾]
+    const QByteArray payload = QByteArray::fromHex("AA55010203");
+    const quint16 crc = CrcCalculator::crc16Modbus(payload);
+    QByteArray good = payload;
+    good.append(static_cast<char>(crc & 0xFF));
+    good.append(static_cast<char>((crc >> 8) & 0xFF));
+    good.append(QByteArray::fromHex("0D0A"));
+    QCOMPARE(good.size(), 9);
+
+    parser.feed(good);
+    QCOMPARE(frames.size(), 1);
+    QCOMPARE(frames.at(0), good);
+}
+
+void TestCore::frameParserTailMismatch()
+{
+    FrameSpec spec;
+    spec.header = QByteArray::fromHex("AA55");
+    spec.lengthMode = FrameSpec::LengthMode::Fixed;
+    spec.fixedFrameLength = 9; // 帧头 2 + 数据 3 + CRC16 2 + 帧尾 2
+    spec.checksum = FrameChecksum::Crc16Modbus;
+    spec.tail = QByteArray::fromHex("0D0A");
+    spec.tailMode = FrameTailMode::Fixed;
+
+    DataFrameParser parser;
+    parser.setSpec(spec);
+
+    QVector<QByteArray> frames;
+    int discarded = 0;
+    parser.onFrame = [&frames](const QByteArray &frame) { frames.append(frame); };
+    parser.onBytesDiscarded = [&discarded](int bytes) { discarded += bytes; };
+
+    const QByteArray payload = QByteArray::fromHex("AA55010203");
+    const quint16 crc = CrcCalculator::crc16Modbus(payload);
+    QByteArray bad = payload;
+    bad.append(static_cast<char>(crc & 0xFF));
+    bad.append(static_cast<char>((crc >> 8) & 0xFF));
+    bad.append(QByteArray::fromHex("0A0D")); // 帧尾字节顺序反了
+
+    parser.feed(bad);
+    QCOMPARE(frames.size(), 0);
     QVERIFY(discarded > 0);
 }
 
@@ -785,6 +1083,180 @@ void TestCore::autoReplyJsonRoundTrip()
     QCOMPARE(restored.rules().first().replyPayload, QStringLiteral("PONG"));
 
     QVERIFY(!restored.fromJson(QStringLiteral("[]not json")));
+}
+
+void TestCore::sequenceSetAddUpdateRemove()
+{
+    SequenceSet set;
+    SequenceGroup group;
+    group.name = QStringLiteral("查询组");
+    group.intervalMs = 500;
+    SequenceItem item;
+    item.label = QStringLiteral("读保持寄存器");
+    item.payload = QByteArray::fromHex("010300000002");
+    group.items.append(item);
+
+    const int index = set.addGroup(group);
+    QCOMPARE(index, 0);
+    QCOMPARE(set.count(), 1);
+    QCOMPARE(set.groupAt(0)->name, QStringLiteral("查询组"));
+    QCOMPARE(set.groupAt(0)->intervalMs, 500);
+    QCOMPARE(set.groupAt(0)->items.size(), 1);
+
+    SequenceGroup updated = *set.groupAt(0);
+    updated.intervalMs = 1500;
+    QVERIFY(set.updateGroup(0, updated));
+    QCOMPARE(set.groupAt(0)->intervalMs, 1500);
+
+    QVERIFY(set.removeGroup(0));
+    QCOMPARE(set.count(), 0);
+    QVERIFY(!set.removeGroup(0));
+    QVERIFY(!set.updateGroup(0, updated));
+    QVERIFY(set.groupAt(0) == nullptr);
+}
+
+void TestCore::sequenceSetRejectsEmptyGroup()
+{
+    SequenceSet set;
+    SequenceGroup empty;
+    QCOMPARE(set.addGroup(empty), -1);
+    QCOMPARE(set.count(), 0);
+}
+
+void TestCore::sequenceSetJsonRoundTrip()
+{
+    SequenceSet set;
+    SequenceGroup group;
+    group.name = QStringLiteral("组一");
+    group.intervalMs = 800;
+    SequenceItem a;
+    a.label = QStringLiteral("A");
+    a.payload = QByteArray::fromHex("AABB");
+    SequenceItem b;
+    b.label = QStringLiteral("B");
+    b.payload = QByteArray::fromHex("CCDD");
+    group.items.append(a);
+    group.items.append(b);
+    set.addGroup(group);
+
+    const QString json = set.toJson();
+    SequenceSet restored;
+    QVERIFY(restored.fromJson(json));
+    QCOMPARE(restored.count(), 1);
+    const SequenceGroup *g = restored.groupAt(0);
+    QVERIFY(g != nullptr);
+    QCOMPARE(g->name, QStringLiteral("组一"));
+    QCOMPARE(g->intervalMs, 800);
+    QCOMPARE(g->items.size(), 2);
+    QCOMPARE(g->items.at(0).payload, QByteArray::fromHex("AABB"));
+    QCOMPARE(g->items.at(1).label, QStringLiteral("B"));
+
+    QVERIFY(!restored.fromJson(QStringLiteral("not json")));
+}
+
+void TestCore::sequenceRunnerWalksItemsThenGroups()
+{
+    QVector<SequenceGroup> groups;
+    SequenceGroup g1;
+    g1.name = QStringLiteral("G1");
+    SequenceItem i1;
+    i1.payload = QByteArray::fromHex("01");
+    SequenceItem i2;
+    i2.payload = QByteArray::fromHex("02");
+    g1.items.append(i1);
+    g1.items.append(i2);
+
+    SequenceGroup g2;
+    g2.name = QStringLiteral("G2");
+    SequenceItem i3;
+    i3.payload = QByteArray::fromHex("03");
+    g2.items.append(i3);
+    groups.append(g1);
+    groups.append(g2);
+
+    SequenceRunner runner;
+    runner.setGroups(groups);
+    QVERIFY(runner.start());
+
+    QByteArray payload;
+    QString label;
+    QVERIFY(runner.currentPayload(&payload, &label));
+    QCOMPARE(payload, QByteArray::fromHex("01"));
+
+    runner.advance();
+    QVERIFY(runner.currentPayload(&payload, &label));
+    QCOMPARE(payload, QByteArray::fromHex("02"));
+    QCOMPARE(runner.currentGroupIndex(), 0);
+
+    runner.advance();
+    QVERIFY(runner.currentPayload(&payload, &label));
+    QCOMPARE(payload, QByteArray::fromHex("03"));
+    QCOMPARE(runner.currentGroupIndex(), 1);
+}
+
+void TestCore::sequenceRunnerLoopsBackToFirstGroup()
+{
+    QVector<SequenceGroup> groups;
+    SequenceGroup g1;
+    SequenceItem i1;
+    i1.payload = QByteArray::fromHex("01");
+    g1.items.append(i1);
+    SequenceGroup g2;
+    SequenceItem i2;
+    i2.payload = QByteArray::fromHex("02");
+    g2.items.append(i2);
+    groups.append(g1);
+    groups.append(g2);
+
+    SequenceRunner runner;
+    runner.setGroups(groups);
+    QVERIFY(runner.start());
+
+    QByteArray payload;
+    runner.currentPayload(&payload, nullptr);
+    QCOMPARE(payload, QByteArray::fromHex("01"));
+    runner.advance();
+    runner.currentPayload(&payload, nullptr);
+    QCOMPARE(payload, QByteArray::fromHex("02"));
+
+    // 全部发完后应回到第一组
+    runner.advance();
+    QCOMPARE(runner.currentGroupIndex(), 0);
+    QCOMPARE(runner.currentItemIndex(), 0);
+    QVERIFY(runner.currentPayload(&payload, nullptr));
+    QCOMPARE(payload, QByteArray::fromHex("01"));
+    QVERIFY(runner.isRunning());
+}
+
+void TestCore::sequenceRunnerSkipsEmptyGroups()
+{
+    QVector<SequenceGroup> groups;
+    SequenceGroup empty;
+    empty.name = QStringLiteral("空组");
+    groups.append(empty);
+
+    SequenceGroup g2;
+    SequenceItem i;
+    i.payload = QByteArray::fromHex("AA");
+    g2.items.append(i);
+    groups.append(g2);
+
+    SequenceRunner runner;
+    runner.setGroups(groups);
+    QVERIFY(runner.start());
+    QCOMPARE(runner.currentGroupIndex(), 1);
+
+    QByteArray payload;
+    QVERIFY(runner.currentPayload(&payload, nullptr));
+    QCOMPARE(payload, QByteArray::fromHex("AA"));
+}
+
+void TestCore::sequenceRunnerStartFailsWhenEmpty()
+{
+    SequenceRunner runner;
+    QVERIFY(!runner.start());
+    QVERIFY(!runner.isRunning());
+    QVERIFY(!runner.currentPayload(nullptr, nullptr));
 }
 
 QTEST_GUILESS_MAIN(TestCore)

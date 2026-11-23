@@ -33,11 +33,17 @@ SerialScope/
 │   │   ├── SerialConfig.h
 │   │   ├── SerialWorker.h/.cpp     # QSerialPort 工作线程
 │   │   ├── DataLogger.h/.cpp       # 异步日志（独立线程 + 有界队列）
+│   │   ├── QuickSend.h/.cpp        # 快捷发送条目集合
+│   │   ├── AutoReply.h/.cpp        # 自动回复规则引擎
+│   │   ├── SequenceSender.h/.cpp   # 轮发序列（组/条目 + 轮转发引擎）
 │   │   └── parser/
 │   │       ├── HexCodec.h/.cpp          # HEX 解析/格式化、编码转换（含 GBK）
 │   │       ├── AsciiValueParser.h/.cpp  # ASCII 行数字提取
-│   │       ├── DataFrameParser.h/.cpp   # 帧状态机（帧头/长度/CRC/重同步）
-│   │       └── HexFieldExtractor.h/.cpp # 帧字段 → 数值通道
+│   │       ├── DataFrameParser.h/.cpp   # 帧状态机（帧头/长度/校验/帧尾/重同步）
+│   │       ├── EncodingFixer.h/.cpp     # 编码互转与乱码修复、UTF-8 合法性判定
+│   │       ├── HexFieldExtractor.h/.cpp # 帧字段 → 数值通道
+│   │       ├── TextFilter.h/.cpp        # 关键词/正则过滤与高亮区间
+│   │       └── ControlCharVisualizer.h/.cpp # 控制字符可视化
 │   ├── utils/
 │   │   ├── CrcCalculator.h/.cpp
 │   │   └── SettingsManager.h/.cpp
@@ -48,10 +54,15 @@ SerialScope/
 │       ├── SendPanel.h/.cpp
 │       ├── WaveformPanel.h/.cpp    # 波形数据源/解析调度、图例、导出
 │       ├── PlotWidget.h/.cpp       # QPainter 自绘曲线（降采样绘制）
+│       ├── FlowLayout.h/.cpp       # 流式布局（窄窗自动换行）
+│       ├── WidgetUtil.h            # repolish 等小工具
 │       ├── Theme.h/.cpp            # 浅色/深色 QSS + 调色板
 │       └── dialogs/
 │           ├── AboutDialog.h/.cpp       # 版本、GitHub、许可证
+│           ├── AutoReplyDialog.h/.cpp   # 自动回复规则编辑
 │           ├── CrcToolDialog.h/.cpp
+│           ├── EncodingFixDialog.h/.cpp # 编码转换 / 乱码修复
+│           ├── SequenceDialog.h/.cpp    # 轮发序列编辑（组 + 条目）
 │           └── HexFieldConfigDialog.h/.cpp
 ├── resources/
 │   ├── app.qrc                     # 图标、GitHub 标志、许可证资源
@@ -60,8 +71,11 @@ SerialScope/
 ├── LICENSES/                       # LGPL-3.0、Octicons MIT
 ├── tests/
 │   ├── CMakeLists.txt
-│   ├── test_core.cpp               # Qt Test：CRC / HEX / ASCII 解析 / 帧状态机 / 字段提取
-│   └── test_serial_config.cpp      # Qt Test：串口参数选项、端口输入/刷新/持久化
+│   ├── test_core.cpp               # Qt Test：CRC / HEX / ASCII 解析 / 帧状态机 /
+│   │                               #   字段提取 / 过滤 / 控制字符 / 快捷发送 /
+│   │                               #   自动回复 / 编码修复 / 轮发序列
+│   ├── test_serial_config.cpp      # Qt Test：串口参数选项、端口输入/刷新/持久化
+│   └── test_flowlayout.cpp         # Qt Test：流式布局换行与高度计算
 ├── tools/
 │   └── make_assets.cpp             # 一次性图标生成工具（不参与应用构建）
 └── scripts/
@@ -168,15 +182,24 @@ public:
     std::function<void()> onOverflow;
 };
 
-// core/parser/DataFrameParser.h —— 帧头搜索 / 半包 / 长度域 / 可选 CRC16-Modbus 校验
+// core/parser/DataFrameParser.h —— 帧头搜索 / 半包 / 长度域 / 可选校验 + 可选帧尾
+// 帧内结构约定：[帧头][长度/数据][校验][帧尾]
+enum class FrameChecksum {
+    None, Crc16Modbus, Crc16Ccitt, Sum8, Xor8, Lrc8
+};
+enum class FrameTailMode { None, Fixed };
 struct FrameSpec {
     QByteArray header;                 // 如 AA 55
     enum class LengthMode { Fixed, LengthByte } lengthMode = LengthMode::LengthByte;
     int lengthByteOffset = 2;          // 长度字节在帧内偏移
     int lengthAdjust = 0;              // frameLen = lengthByte + lengthAdjust
     int fixedFrameLength = 16;
-    bool verifyCrc16Modbus = false;
+    FrameChecksum checksum = FrameChecksum::None;  // 校验算法
+    QByteArray tail;                   // 帧尾字节序列（空 = 无帧尾）
+    FrameTailMode tailMode = FrameTailMode::None;
     int maxFrameLength = 4096;
+    int checksumLength() const;        // 校验字段字节数（0 = 无）
+    int tailLength() const;            // 帧尾字节数
 };
 class DataFrameParser {
 public:
@@ -192,6 +215,49 @@ struct HexField { QString name; int offset; FieldType type; };
 struct HexParseSpec { FrameSpec frame; QVector<HexField> fields; bool bigEndian = false; };
 QVector<double> HexFieldExtractor::extract(const QByteArray &frame,
                                            const HexParseSpec &spec, bool *ok);
+
+// core/parser/EncodingFixer.h —— 编码互转与乱码修复
+class EncodingFixer {
+public:
+    enum class Encoding { Latin1, Utf8, Gbk, Ascii };
+    struct Candidate {
+        Encoding encoding; QString text;
+        int replacementChars;  // U+FFFD 个数
+        int score;             // 可读性评分
+        bool bytesAreValidUtf8;
+    };
+    static QString fix(const QString &garbled, Encoding src, Encoding dst);
+    static QVector<Candidate> candidates(const QByteArray &bytes);
+    static bool isValidUtf8(const QByteArray &bytes);  // 严格多字节校验
+    static int readabilityScore(const QString &text, int *replacementChars);
+};
+
+// core/SequenceSender.h —— 轮发序列
+struct SequenceItem { QString label; QByteArray payload; };
+struct SequenceGroup { QString name; QVector<SequenceItem> items; int intervalMs = 1000; };
+class SequenceSet {           // 组集合：增删改查 + JSON 持久化
+public:
+    int addGroup(const SequenceGroup &);
+    bool updateGroup(int, const SequenceGroup &);
+    bool removeGroup(int);
+    const SequenceGroup *groupAt(int) const;
+    QString toJson() const;  bool fromJson(const QString &);
+};
+class SequenceRunner {        // 轮转发引擎：指针语义指向「下一条要发的条目」
+public:
+    enum class Mode { Interval, Reply };  // 定时 / 应答后
+    bool start();  void stop();
+    bool currentPayload(QByteArray *, QString *) const;
+    void advance();   // 跨组推进，全部发完回到第一组
+};
+
+// core/parser/TextFilter.h —— 关键词 / 正则过滤
+class TextFilter {
+public:
+    void setPattern(const QString &, bool useRegex);
+    bool matches(const QString &line) const;
+    QVector<QPair<int,int>> matchRanges(const QString &line) const;  // 高亮区间
+};
 ```
 
 ## 5. 波形数据源
@@ -203,16 +269,51 @@ QVector<double> HexFieldExtractor::extract(const QByteArray &frame,
 - 超过 8 个数值忽略多余项；十六进制字面量（0x…）不参与解析。
 
 ### 5.2 HEX 帧解析
-- 帧结构由「协议配置」对话框定义：帧头、长度模式（固定帧长 / 长度字节）、长度字节偏移与补偿、可选 CRC16-Modbus 校验、字节序。
+- 帧结构由「协议配置」对话框定义：帧头、长度模式（固定帧长 / 长度字节）、长度字节偏移与补偿、
+  校验算法（None / CRC16-Modbus / CRC16-CCITT / Sum8 / Xor8 / LRC8）、固定帧尾、字节序。
+- 帧内结构约定 `[帧头][长度/数据][校验][帧尾]`；校验字段偏移 = `帧长 - 帧尾长 - 校验长`。
 - 字段表定义每个通道的 `名称 / 字节偏移 / 类型`（int8/uint8/int16/uint16/int32/uint32/float32）。
-- 状态机对字节流自动搜索帧头、处理半包、CRC 失败丢 1 字节重同步。
+- 状态机对字节流自动搜索帧头、处理半包、校验或帧尾失败丢 1 字节重同步。
 - 每帧提取所有字段 → 同一时间戳写入各通道。
+- 旧配置里的 `verifyCrc16Modbus` 布尔项在加载时迁移为 `checksum = Crc16Modbus`。
 
 ### 5.3 显示与性能
 - 时间轴：相对「图纸起点」的秒数，滚动窗口（5/10/30/60 s）。
 - Y 轴自动量程（带 10% 边距），坐标刻度取 1/2/5×10^n 的「漂亮数」。
 - 绘制时按像素列做 min/max 包络降采样，60fps 下可稳定绘制 >10 万点。
 - 暂停只冻结曲线显示；数据仍继续解析和采集，恢复后立即显示最新窗口。清空同时重置解析器与时间基准。
+
+## 5A. 轮发序列与乱码修复
+
+### 5A.1 轮发序列
+
+- 数据结构：`SequenceSet`（组集合，持久化） + `SequenceRunner`（轮转发引擎，纯状态机）。
+- 指针语义：`m_groupIndex` / `m_itemIndex` 始终指向**下一条要发送的条目**，
+  `advance()` 负责跨组推进与回到第一组，调用方无需关心边界。
+- 两种触发方式：
+  - `Interval`（定时）：由 `QTimer` 按当前组的 `intervalMs` 触发。
+  - `Reply`（应答后）：发出第一条后置 `m_sequenceAwaitingReply`，
+    `MainWindow::handleIncomingData()` 在收到任何数据时通知发送区，触发下一条。
+- 端口关闭时必须停掉轮发（`SendPanel::setPortOpen(false)`），
+  否则会对着一个已断开的串口空转。
+- 组名重复时自动加序号，避免界面上出现两个同名组。
+
+### 5A.2 乱码修复的判据
+
+- 乱码成因是「用错误的编码解读了字节」。修复 = 退回字节再换编码重解：
+  `bytes = encode(乱码文本, 源编码)` → `text = decode(bytes, 目标编码)`。
+- 文本模式存在两种情况：
+  - 设备发 GBK、工具按 UTF-8 解读：字节已丢失（出现 U+FFFD），必须改用 HEX 模式
+    粘贴原始字节，文本模式救不回来。
+  - 设备发 UTF-8、工具按 GBK 解读：字节还在，文本模式直接可逆。
+- 候选排序的**主判据是「字节是否为合法 UTF-8 序列」**，而不是解码后的字符是否好看：
+  UTF-8 自描述，合法与否是二值判据；GBK 的中文字节对（如 `B4 AE`）一定不是合法 UTF-8。
+  只看字符可读性会出错——用错编码解出来的怪字符（希腊字母、西里尔字母）仍是合法字符，
+  而 Latin-1 / ASCII 对任意字节都「解得出」，评分反而虚高。
+- 可读性评分作为次要判据：替换字符（-20）、控制字符（-8）、私用区（-8）、
+  未分配码位（-6）、希腊/西里尔字母（-6）扣分；ASCII（+2）、CJK 汉字（+3）加分。
+- `isValidUtf8()` 是手写的严格多字节校验：拒绝过长编码（`C0`/`C1`）、拒绝截断序列、
+  拒绝非法续字节、检查过长形式（`E0 80`、`F0 80`）。
 
 ## 6. 日志格式
 

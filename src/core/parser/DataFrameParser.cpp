@@ -4,6 +4,27 @@
 
 #include <QtEndian>
 
+int FrameSpec::checksumLength() const
+{
+    switch (checksum) {
+    case FrameChecksum::Crc16Modbus:
+    case FrameChecksum::Crc16Ccitt:
+        return 2;
+    case FrameChecksum::Sum8:
+    case FrameChecksum::Xor8:
+    case FrameChecksum::Lrc8:
+        return 1;
+    case FrameChecksum::None:
+        break;
+    }
+    return 0;
+}
+
+int FrameSpec::tailLength() const
+{
+    return hasTail() ? tail.size() : 0;
+}
+
 void DataFrameParser::setSpec(const FrameSpec &spec)
 {
     m_spec = spec;
@@ -11,6 +32,12 @@ void DataFrameParser::setSpec(const FrameSpec &spec)
         m_spec.maxFrameLength = 8;
     if (m_spec.fixedFrameLength < 1)
         m_spec.fixedFrameLength = 1;
+    // 固定帧长模式下必须把校验与帧尾算进帧长，否则永远切不出完整帧
+    if (m_spec.lengthMode == FrameSpec::LengthMode::Fixed) {
+        const int needed = m_spec.checksumLength() + m_spec.tailLength();
+        if (m_spec.fixedFrameLength < needed)
+            m_spec.fixedFrameLength = needed;
+    }
     reset();
 }
 
@@ -47,7 +74,7 @@ void DataFrameParser::feed(const QByteArray &data)
         const int frameLen = m_spec.fixedFrameLength;
         while (m_buffer.size() >= frameLen) {
             const QByteArray frame = m_buffer.left(frameLen);
-            if (m_spec.verifyCrc16Modbus && !verifyCrc16(frame)) {
+            if (!verifyChecksum(frame) || !verifyTail(frame)) {
                 discard(1); // 校验失败：滑动 1 字节重新同步
                 continue;
             }
@@ -88,6 +115,8 @@ void DataFrameParser::feed(const QByteArray &data)
             frameLen = lengthValue + m_spec.lengthAdjust;
         }
 
+        // 帧内结构：[帧头][长度/数据][校验][帧尾]
+        // lengthAdjust 由用户在协议配置里给定，需自行包含校验与帧尾长度。
         if (frameLen < headerSize + 1 || frameLen > m_spec.maxFrameLength
             || (m_spec.lengthMode == FrameSpec::LengthMode::LengthByte
                 && m_spec.lengthByteOffset >= frameLen)) {
@@ -100,8 +129,8 @@ void DataFrameParser::feed(const QByteArray &data)
 
         const QByteArray frame = m_buffer.left(frameLen);
 
-        if (m_spec.verifyCrc16Modbus && !verifyCrc16(frame)) {
-            discard(1); // CRC 失败：丢 1 字节重新同步
+        if (!verifyChecksum(frame) || !verifyTail(frame)) {
+            discard(1); // 校验/帧尾失败：丢 1 字节重新同步
             continue;
         }
 
@@ -111,13 +140,52 @@ void DataFrameParser::feed(const QByteArray &data)
     }
 }
 
-bool DataFrameParser::verifyCrc16(const QByteArray &frame) const
+bool DataFrameParser::verifyChecksum(const QByteArray &frame) const
 {
-    if (frame.size() < 3)
+    const int len = m_spec.checksumLength();
+    if (len == 0)
+        return true;
+    if (frame.size() <= len)
         return false;
-    const quint16 expected = qFromLittleEndian<quint16>(
-        reinterpret_cast<const uchar *>(frame.constData() + frame.size() - 2));
-    const quint16 actual = CrcCalculator::crc16Modbus(
-        reinterpret_cast<const quint8 *>(frame.constData()), frame.size() - 2);
-    return expected == actual;
+
+    // 校验字段位于校验+帧尾之前，因此取偏移时要把帧尾长度算进去
+    const int tailLen = m_spec.tailLength();
+    const int checksumOffset = frame.size() - tailLen - len;
+    if (checksumOffset < 0)
+        return false;
+
+    const QByteArray payload = frame.left(checksumOffset);
+    const uchar *checksumBytes =
+        reinterpret_cast<const uchar *>(frame.constData() + checksumOffset);
+
+    switch (m_spec.checksum) {
+    case FrameChecksum::Crc16Modbus: {
+        const quint16 expected = qFromLittleEndian<quint16>(checksumBytes);
+        const quint16 actual = CrcCalculator::crc16Modbus(payload);
+        return expected == actual;
+    }
+    case FrameChecksum::Crc16Ccitt: {
+        const quint16 expected = qFromBigEndian<quint16>(checksumBytes);
+        const quint16 actual = CrcCalculator::crc16CcittFalse(payload);
+        return expected == actual;
+    }
+    case FrameChecksum::Sum8:
+        return checksumBytes[0] == CrcCalculator::sum8(payload);
+    case FrameChecksum::Xor8:
+        return checksumBytes[0] == CrcCalculator::xor8(payload);
+    case FrameChecksum::Lrc8:
+        return checksumBytes[0] == CrcCalculator::lrc8(payload);
+    case FrameChecksum::None:
+        break;
+    }
+    return true;
+}
+
+bool DataFrameParser::verifyTail(const QByteArray &frame) const
+{
+    if (!m_spec.hasTail())
+        return true;
+    if (frame.size() < m_spec.tail.size())
+        return false;
+    return frame.endsWith(m_spec.tail);
 }

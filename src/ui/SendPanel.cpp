@@ -3,6 +3,7 @@
 #include "core/parser/HexCodec.h"
 #include "ui/Theme.h"
 #include "ui/WidgetUtil.h"
+#include "ui/dialogs/SequenceDialog.h"
 #include "utils/CrcCalculator.h"
 #include "utils/SettingsManager.h"
 
@@ -43,6 +44,7 @@ QLabel *makeMutedLabel(const QString &text, QWidget *parent)
 SendPanel::SendPanel(QWidget *parent)
     : QWidget(parent)
     , m_timedTimer(new QTimer(this))
+    , m_sequenceTimer(new QTimer(this))
 {
     setupUi();
     restoreSettings();
@@ -71,6 +73,11 @@ SendPanel::SendPanel(QWidget *parent)
     connect(m_convertButton, &QToolButton::clicked, this, &SendPanel::onConvertClicked);
     connect(m_quickSendSaveButton, &QToolButton::clicked, this, &SendPanel::onQuickSendSave);
     connect(m_quickSendDeleteButton, &QToolButton::clicked, this, &SendPanel::onQuickSendDelete);
+    connect(m_sequenceEditButton, &QToolButton::clicked, this, &SendPanel::onSequenceEdit);
+    connect(m_sequenceStartButton, &QToolButton::clicked, this, &SendPanel::onSequenceStart);
+    connect(m_sequenceModeCombo, &QComboBox::currentIndexChanged, this,
+            &SendPanel::onSequenceModeChanged);
+    connect(m_sequenceTimer, &QTimer::timeout, this, &SendPanel::onTimedTimeout);
 
     auto *sendShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Return")), this);
     sendShortcut->setContext(Qt::WidgetWithChildrenShortcut);
@@ -124,10 +131,12 @@ void SendPanel::setupUi()
 
     controls->addWidget(makeMutedLabel(tr("校验"), this));
     m_checksumCombo = new QComboBox(this);
-    m_checksumCombo->addItem(tr("无"), 0);
-    m_checksumCombo->addItem(QStringLiteral("CRC16-Modbus"), 1);
-    m_checksumCombo->addItem(QStringLiteral("CRC16-CCITT"), 2);
-    m_checksumCombo->addItem(QStringLiteral("Sum8"), 3);
+    m_checksumCombo->addItem(tr("无"), static_cast<int>(CrcCalculator::AppendMode::None));
+    m_checksumCombo->addItem(QStringLiteral("CRC16-Modbus"), static_cast<int>(CrcCalculator::AppendMode::Crc16Modbus));
+    m_checksumCombo->addItem(QStringLiteral("CRC16-CCITT"), static_cast<int>(CrcCalculator::AppendMode::Crc16Ccitt));
+    m_checksumCombo->addItem(QStringLiteral("Sum8"), static_cast<int>(CrcCalculator::AppendMode::Sum8));
+    m_checksumCombo->addItem(QStringLiteral("Xor8"), static_cast<int>(CrcCalculator::AppendMode::Xor8));
+    m_checksumCombo->addItem(QStringLiteral("LRC8"), static_cast<int>(CrcCalculator::AppendMode::Lrc8));
     m_checksumCombo->setFixedWidth(132);
     m_checksumCombo->setToolTip(tr("校验值附加在数据末尾、行尾之前；Modbus 低字节在前，CCITT 高字节在前"));
     controls->addWidget(m_checksumCombo);
@@ -229,6 +238,40 @@ void SendPanel::setupUi()
     quickLayout->addStretch(1);
     layout->addWidget(m_quickSendBar);
 
+    // ---- 轮发序列栏 ----
+    m_sequenceBar = new QWidget(this);
+    auto *sequenceLayout = new QHBoxLayout(m_sequenceBar);
+    sequenceLayout->setContentsMargins(0, 0, 0, 0);
+    sequenceLayout->setSpacing(6);
+
+    sequenceLayout->addWidget(makeMutedLabel(tr("轮发"), m_sequenceBar));
+
+    m_sequenceModeCombo = new QComboBox(m_sequenceBar);
+    m_sequenceModeCombo->addItem(tr("定时"), static_cast<int>(SequenceRunner::Mode::Interval));
+    m_sequenceModeCombo->addItem(tr("应答后"), static_cast<int>(SequenceRunner::Mode::Reply));
+    m_sequenceModeCombo->setFixedWidth(84);
+    m_sequenceModeCombo->setToolTip(
+        tr("定时：按组间隔逐条发送；\n"
+           "应答后：发出一条后等待设备应答，收到数据才发送下一条"));
+    sequenceLayout->addWidget(m_sequenceModeCombo);
+
+    m_sequenceEditButton = new QToolButton(m_sequenceBar);
+    m_sequenceEditButton->setText(tr("编辑序列…"));
+    m_sequenceEditButton->setToolTip(tr("编辑多组轮发数据"));
+    sequenceLayout->addWidget(m_sequenceEditButton);
+
+    m_sequenceStartButton = new QToolButton(m_sequenceBar);
+    m_sequenceStartButton->setText(tr("开始轮发"));
+    m_sequenceStartButton->setToolTip(tr("开始 / 停止轮发序列"));
+    sequenceLayout->addWidget(m_sequenceStartButton);
+
+    m_sequenceStatusLabel = new QLabel(m_sequenceBar);
+    m_sequenceStatusLabel->setProperty("muted", true);
+    m_sequenceStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    sequenceLayout->addWidget(m_sequenceStatusLabel, 1);
+
+    layout->addWidget(m_sequenceBar);
+
     auto *footer = new QHBoxLayout();
     footer->setContentsMargins(0, 0, 0, 0);
     footer->setSpacing(8);
@@ -250,12 +293,17 @@ void SendPanel::restoreSettings()
     const int encoding = s->value(QStringLiteral("encoding"),
                                   static_cast<int>(TextEncoding::Utf8)).toInt();
     const int lineEnding = s->value(QStringLiteral("lineEnding"), 0).toInt();
+    // 旧版本存的是下拉框索引，新版本存的是 AppendMode 枚举值。
+    // 两者在 None/Crc16Modbus/Crc16Ccitt/Sum8 上一致，
+    // 但新增的 Xor8/Lrc8 只可能来自新版本，这里按 data 匹配更稳妥。
     const int checksum = s->value(QStringLiteral("checksum"), 0).toInt();
     m_intervalSpin->setValue(s->value(QStringLiteral("interval"), 1000).toInt());
     m_countSpin->setValue(s->value(QStringLiteral("count"), 0).toInt());
     m_history = s->value(QStringLiteral("history")).toStringList();
     const QString draft = s->value(QStringLiteral("draft")).toString();
     const QString quickJson = s->value(QStringLiteral("quickSends")).toString();
+    const QString sequenceJson = s->value(QStringLiteral("sequence")).toString();
+    const int sequenceMode = s->value(QStringLiteral("sequenceMode"), 0).toInt();
     s->endGroup();
 
     m_modeCombo->setCurrentIndex(hex ? 1 : 0);
@@ -263,13 +311,22 @@ void SendPanel::restoreSettings()
     const int encodingIndex = m_encodingCombo->findData(encoding);
     m_encodingCombo->setCurrentIndex(encodingIndex >= 0 ? encodingIndex : 0);
     m_lineEndingCombo->setCurrentIndex(qBound(0, lineEnding, m_lineEndingCombo->count() - 1));
-    m_checksumCombo->setCurrentIndex(qBound(0, checksum, m_checksumCombo->count() - 1));
+    const int checksumIndex = m_checksumCombo->findData(checksum);
+    m_checksumCombo->setCurrentIndex(checksumIndex >= 0 ? checksumIndex : 0);
     m_input->setPlainText(draft);
     rebuildHistoryCombo();
 
     if (!quickJson.isEmpty())
         m_quickSends.fromJson(quickJson);
     rebuildQuickSendButtons();
+
+    if (!sequenceJson.isEmpty())
+        m_sequence.fromJson(sequenceJson);
+    const int sequenceModeIndex = m_sequenceModeCombo->findData(sequenceMode);
+    m_sequenceModeCombo->setCurrentIndex(sequenceModeIndex >= 0 ? sequenceModeIndex : 0);
+    m_sequenceRunner.setMode(
+        static_cast<SequenceRunner::Mode>(m_sequenceModeCombo->currentData().toInt()));
+    updateSequenceStatus();
 }
 
 void SendPanel::saveSettings()
@@ -285,6 +342,8 @@ void SendPanel::saveSettings()
     s->setValue(QStringLiteral("history"), m_history);
     s->setValue(QStringLiteral("draft"), m_input->toPlainText());
     s->setValue(QStringLiteral("quickSends"), m_quickSends.toJson());
+    s->setValue(QStringLiteral("sequence"), m_sequence.toJson());
+    s->setValue(QStringLiteral("sequenceMode"), m_sequenceModeCombo->currentData().toInt());
     s->endGroup();
 }
 
@@ -297,9 +356,18 @@ void SendPanel::setPortOpen(bool open)
             m_timedCheck->setChecked(false);
             m_timedTimer->stop();
         }
+        // 端口断开时必须停掉轮发，否则会对着一个不存在的串口空转
+        if (m_sequenceRunning) {
+            m_sequenceTimer->stop();
+            m_sequenceRunner.stop();
+            m_sequenceRunning = false;
+            m_sequenceAwaitingReply = false;
+            m_sequenceStartButton->setText(tr("开始轮发"));
+        }
         m_fileSending = false;
     }
     updateControls();
+    updateSequenceStatus();
 }
 
 bool SendPanel::validateInput(QString *error) const
@@ -699,6 +767,158 @@ void SendPanel::onIntervalChanged(int value)
 void SendPanel::onTextChanged()
 {
     updateControls();
+}
+
+void SendPanel::onSequenceEdit()
+{
+    SequenceDialog dialog(this);
+    dialog.setSequence(m_sequence);
+    dialog.exec();
+    m_sequence = dialog.sequence();
+    m_sequenceRunner.setGroups(m_sequence.groups());
+    saveSettings();
+    updateSequenceStatus();
+}
+
+void SendPanel::onSequenceModeChanged(int index)
+{
+    Q_UNUSED(index)
+    m_sequenceRunner.setMode(
+        static_cast<SequenceRunner::Mode>(m_sequenceModeCombo->currentData().toInt()));
+    saveSettings();
+    updateSequenceStatus();
+}
+
+void SendPanel::onSequenceStart()
+{
+    if (m_sequenceRunning) {
+        stopSequence();
+        return;
+    }
+    startSequence();
+}
+
+void SendPanel::onSequenceStop()
+{
+    stopSequence();
+}
+
+bool SendPanel::startSequence()
+{
+    if (m_sequence.isEmpty()) {
+        setHint(tr("请先编辑轮发序列"), true);
+        return false;
+    }
+    if (!m_portOpen) {
+        setHint(tr("串口未打开"), true);
+        return false;
+    }
+
+    m_sequenceRunner.setGroups(m_sequence.groups());
+    m_sequenceRunner.setMode(
+        static_cast<SequenceRunner::Mode>(m_sequenceModeCombo->currentData().toInt()));
+    if (!m_sequenceRunner.start()) {
+        setHint(tr("轮发序列中没有可用条目"), true);
+        return false;
+    }
+
+    m_sequenceRunning = true;
+    m_sequenceAwaitingReply = false;
+    m_sequenceStartButton->setText(tr("停止轮发"));
+    updateSequenceStatus();
+
+    // 先发第一条
+    sendNextSequenceItem();
+
+    if (m_sequenceRunner.mode() == SequenceRunner::Mode::Interval) {
+        m_sequenceTimer->start(m_sequenceRunner.currentInterval());
+    }
+    return true;
+}
+
+void SendPanel::stopSequence()
+{
+    m_sequenceTimer->stop();
+    m_sequenceRunner.stop();
+    m_sequenceRunning = false;
+    m_sequenceAwaitingReply = false;
+    m_sequenceStartButton->setText(tr("开始轮发"));
+    updateSequenceStatus();
+    emit statusMessage(tr("轮发已停止"));
+}
+
+void SendPanel::sendNextSequenceItem()
+{
+    if (!m_sequenceRunning)
+        return;
+
+    QByteArray payload;
+    QString label;
+    if (!m_sequenceRunner.currentPayload(&payload, &label)) {
+        stopSequence();
+        return;
+    }
+
+    emit dataToSend(payload);
+    m_sequenceRunner.advance();
+    updateSequenceStatus();
+    emit statusMessage(tr("轮发已发送：%1（%2 字节）").arg(label).arg(payload.size()));
+
+    if (m_sequenceRunner.mode() == SequenceRunner::Mode::Reply) {
+        // 等收到应答后再发下一条
+        m_sequenceAwaitingReply = true;
+        updateSequenceStatus();
+    } else {
+        // 定时模式下按当前组间隔重设定时器
+        m_sequenceTimer->start(m_sequenceRunner.currentInterval());
+    }
+}
+
+void SendPanel::onDataReceived()
+{
+    if (!m_sequenceRunning || !m_sequenceAwaitingReply)
+        return;
+    if (m_sequenceRunner.mode() != SequenceRunner::Mode::Reply)
+        return;
+
+    // 收到应答，发送下一条
+    m_sequenceAwaitingReply = false;
+    sendNextSequenceItem();
+}
+
+void SendPanel::updateSequenceStatus()
+{
+    if (!m_sequenceStatusLabel)
+        return;
+
+    if (m_sequence.isEmpty()) {
+        m_sequenceStatusLabel->setText(tr("未配置序列"));
+        m_sequenceStartButton->setEnabled(m_portOpen);
+        m_sequenceStartButton->setText(tr("开始轮发"));
+        return;
+    }
+
+    m_sequenceStartButton->setEnabled(m_portOpen);
+
+    if (!m_sequenceRunning) {
+        m_sequenceStatusLabel->setText(
+            tr("%1 组 · %2 条")
+                .arg(m_sequence.count())
+                .arg([this] {
+                    int total = 0;
+                    for (const SequenceGroup &group : m_sequence.groups())
+                        total += group.items.size();
+                    return total;
+                }()));
+        m_sequenceStartButton->setText(tr("开始轮发"));
+        return;
+    }
+
+    const bool waiting = m_sequenceAwaitingReply;
+    m_sequenceStatusLabel->setText(
+        waiting ? tr("等待应答…（%1）").arg(m_sequenceRunner.currentGroupName())
+                : tr("进行中：%1").arg(m_sequenceRunner.currentLabel()));
+    m_sequenceStartButton->setText(tr("停止轮发"));
 }
 
 void SendPanel::onHistoryActivated(int index)

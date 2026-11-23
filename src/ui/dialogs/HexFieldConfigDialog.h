@@ -4,7 +4,6 @@
 
 #include <QDialog>
 
-class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -38,7 +37,8 @@ private:
     QSpinBox *m_lengthOffsetSpin = nullptr;
     QSpinBox *m_lengthAdjustSpin = nullptr;
     QSpinBox *m_fixedLengthSpin = nullptr;
-    QCheckBox *m_crcCheck = nullptr;
+    QComboBox *m_checksumCombo = nullptr;
+    QLineEdit *m_tailEdit = nullptr;
     QComboBox *m_endianCombo = nullptr;
     QTableWidget *m_fieldTable = nullptr;
     QLabel *m_errorLabel = nullptr;

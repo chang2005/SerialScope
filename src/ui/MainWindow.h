@@ -49,6 +49,7 @@ private slots:
 
     void toggleTheme(bool dark);
     void showCrcTool();
+    void showEncodingTool();
     void showAutoReplyRules();
     void onAutoReplyToggled(bool enabled);
     void showAbout();
@@ -93,6 +94,7 @@ private:
     QAction *m_autoLogAction = nullptr;
     QAction *m_themeAction = nullptr;
     QAction *m_crcAction = nullptr;
+    QAction *m_encodingAction = nullptr;
     QAction *m_autoReplyAction = nullptr;
 
     // 自动回复

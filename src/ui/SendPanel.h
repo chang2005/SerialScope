@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/QuickSend.h"
+#include "core/SequenceSender.h"
 
 #include <QByteArray>
 #include <QStringList>
@@ -30,6 +31,8 @@ public slots:
     void setFileProgress(qint64 sentBytes, qint64 totalBytes);
     void onFileSendFinished(bool success, const QString &errorMessage);
     void onTxBackpressure(qint64 queuedBytes);
+    /// 收到数据时通知发送区：应答触发模式下据此发送下一条
+    void onDataReceived();
 
 signals:
     void dataToSend(const QByteArray &data);
@@ -51,6 +54,10 @@ private slots:
     void onQuickSendSave();
     void onQuickSendDelete();
     void rebuildQuickSendButtons();
+    void onSequenceEdit();
+    void onSequenceStart();
+    void onSequenceStop();
+    void onSequenceModeChanged(int index);
 
 private:
     void setupUi();
@@ -67,6 +74,14 @@ private:
     bool buildRawPayload(QByteArray *payload, QString *error) const;
     /// 用当前输入内容构造一条快捷发送条目
     QuickSendItem currentQuickSendItem() const;
+    /// 发送轮发序列的当前条目；应答触发模式下会等待应答
+    void sendNextSequenceItem();
+    /// 启动轮发（定时或应答触发）
+    bool startSequence();
+    /// 停止轮发
+    void stopSequence();
+    /// 刷新轮发状态显示
+    void updateSequenceStatus();
 
     QComboBox *m_modeCombo = nullptr;
     QComboBox *m_encodingCombo = nullptr;
@@ -92,6 +107,18 @@ private:
     QToolButton *m_quickSendDeleteButton = nullptr;
     QVector<QPushButton *> m_quickSendButtons;
     QuickSendList m_quickSends;
+
+    // 轮发序列
+    QWidget *m_sequenceBar = nullptr;
+    QComboBox *m_sequenceModeCombo = nullptr;
+    QToolButton *m_sequenceEditButton = nullptr;
+    QToolButton *m_sequenceStartButton = nullptr;
+    QLabel *m_sequenceStatusLabel = nullptr;
+    SequenceSet m_sequence;
+    SequenceRunner m_sequenceRunner;
+    QTimer *m_sequenceTimer = nullptr;
+    bool m_sequenceRunning = false;
+    bool m_sequenceAwaitingReply = false;
 
     QStringList m_history;
     bool m_hexMode = false;

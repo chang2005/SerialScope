@@ -79,8 +79,22 @@ void HexFieldConfigDialog::setupUi()
     m_fixedLengthSpin->setValue(16);
     form->addRow(tr("固定帧长"), m_fixedLengthSpin);
 
-    m_crcCheck = new QCheckBox(tr("校验帧末 2 字节（CRC16-Modbus，小端）"), frameGroup);
-    form->addRow(tr("校验"), m_crcCheck);
+    m_checksumCombo = new QComboBox(frameGroup);
+    m_checksumCombo->addItem(tr("不校验"), static_cast<int>(FrameChecksum::None));
+    m_checksumCombo->addItem(tr("CRC16-Modbus（小端）"), static_cast<int>(FrameChecksum::Crc16Modbus));
+    m_checksumCombo->addItem(tr("CRC16-CCITT（高字节在前）"), static_cast<int>(FrameChecksum::Crc16Ccitt));
+    m_checksumCombo->addItem(tr("Sum8（累加和）"), static_cast<int>(FrameChecksum::Sum8));
+    m_checksumCombo->addItem(tr("Xor8（异或）"), static_cast<int>(FrameChecksum::Xor8));
+    m_checksumCombo->addItem(tr("LRC8（补码）"), static_cast<int>(FrameChecksum::Lrc8));
+    m_checksumCombo->setToolTip(
+        tr("帧内顺序为 [帧头][长度/数据][校验][帧尾]；\n"
+           "选择校验算法后，长度补偿需包含校验与帧尾的字节数。"));
+    form->addRow(tr("校验"), m_checksumCombo);
+
+    m_tailEdit = new QLineEdit(frameGroup);
+    m_tailEdit->setPlaceholderText(tr("帧尾，如 0D 0A（留空表示无帧尾）"));
+    m_tailEdit->setToolTip(tr("帧尾固定字节序列，位于校验字段之后"));
+    form->addRow(tr("帧尾"), m_tailEdit);
 
     m_endianCombo = new QComboBox(frameGroup);
     m_endianCombo->addItem(tr("小端（低字节在前）"), false);
@@ -189,7 +203,11 @@ void HexFieldConfigDialog::setSpec(const HexParseSpec &spec)
     m_lengthOffsetSpin->setValue(spec.frame.lengthByteOffset);
     m_lengthAdjustSpin->setValue(spec.frame.lengthAdjust);
     m_fixedLengthSpin->setValue(spec.frame.fixedFrameLength);
-    m_crcCheck->setChecked(spec.frame.verifyCrc16Modbus);
+    const int checksumIndex =
+        m_checksumCombo->findData(static_cast<int>(spec.frame.checksum));
+    m_checksumCombo->setCurrentIndex(checksumIndex >= 0 ? checksumIndex : 0);
+    m_tailEdit->setText(
+        QString::fromLatin1(spec.frame.tail.toHex(' ').toUpper()));
     m_endianCombo->setCurrentIndex(spec.bigEndian ? 1 : 0);
     updateLengthWidgets();
 
@@ -211,7 +229,11 @@ HexParseSpec HexFieldConfigDialog::readSpec() const
     spec.frame.lengthByteOffset = m_lengthOffsetSpin->value();
     spec.frame.lengthAdjust = m_lengthAdjustSpin->value();
     spec.frame.fixedFrameLength = m_fixedLengthSpin->value();
-    spec.frame.verifyCrc16Modbus = m_crcCheck->isChecked();
+    spec.frame.checksum = static_cast<FrameChecksum>(m_checksumCombo->currentData().toInt());
+    QString tailError;
+    spec.frame.tail = HexCodec::parseHex(m_tailEdit->text(), &tailError);
+    spec.frame.tailMode = spec.frame.tail.isEmpty() ? FrameTailMode::None
+                                                    : FrameTailMode::Fixed;
     spec.frame.maxFrameLength = m_maxFrameLength;
     spec.bigEndian = m_endianCombo->currentData().toBool();
 

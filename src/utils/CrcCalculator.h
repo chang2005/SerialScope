@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QString>
 #include <QtGlobal>
 
 /// 常用 CRC / 校验和算法
@@ -29,8 +30,14 @@ public:
     /// 8 位异或校验
     static quint8 xor8(const QByteArray &data);
 
+    /// LRC（纵向冗余校验，Modbus ASCII 模式使用）：所有字节求和后取补码
+    static quint8 lrc8(const QByteArray &data);
+
     /// 将校验值追加到数据末尾的模式
-    enum class AppendMode { None, Crc16Modbus, Crc16Ccitt, Sum8 };
+    enum class AppendMode { None, Crc16Modbus, Crc16Ccitt, Sum8, Xor8, Lrc8 };
 
     static QByteArray appendChecksum(const QByteArray &payload, AppendMode mode);
+
+    /// 追加模式的显示名（用于 UI 下拉框）
+    static QString appendModeName(AppendMode mode);
 };

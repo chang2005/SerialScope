@@ -54,7 +54,9 @@ WaveformPanel::WaveformPanel(QWidget *parent)
     m_hexSpec.frame.lengthByteOffset = 2;
     m_hexSpec.frame.lengthAdjust = 6;
     m_hexSpec.frame.fixedFrameLength = 16;
-    m_hexSpec.frame.verifyCrc16Modbus = false;
+    m_hexSpec.frame.checksum = FrameChecksum::None;
+    m_hexSpec.frame.tail.clear();
+    m_hexSpec.frame.tailMode = FrameTailMode::None;
     m_hexSpec.frame.maxFrameLength = 4096;
     m_hexSpec.bigEndian = false;
     m_hexSpec.fields = {HexField{QStringLiteral("CH1"), 3, FieldType::UInt16},
@@ -212,7 +214,9 @@ QString WaveformPanel::specToJson() const
     root[QStringLiteral("lengthByteOffset")] = m_hexSpec.frame.lengthByteOffset;
     root[QStringLiteral("lengthAdjust")] = m_hexSpec.frame.lengthAdjust;
     root[QStringLiteral("fixedFrameLength")] = m_hexSpec.frame.fixedFrameLength;
-    root[QStringLiteral("verifyCrc16Modbus")] = m_hexSpec.frame.verifyCrc16Modbus;
+    root[QStringLiteral("checksum")] = static_cast<int>(m_hexSpec.frame.checksum);
+    root[QStringLiteral("tail")] = QString::fromLatin1(m_hexSpec.frame.tail.toHex());
+    root[QStringLiteral("tailMode")] = static_cast<int>(m_hexSpec.frame.tailMode);
     root[QStringLiteral("maxFrameLength")] = m_hexSpec.frame.maxFrameLength;
     root[QStringLiteral("bigEndian")] = m_hexSpec.bigEndian;
 
@@ -255,8 +259,20 @@ void WaveformPanel::loadSpecFromJson(const QString &json)
         root.value(QStringLiteral("lengthAdjust")).toInt(spec.frame.lengthAdjust);
     spec.frame.fixedFrameLength =
         root.value(QStringLiteral("fixedFrameLength")).toInt(spec.frame.fixedFrameLength);
-    spec.frame.verifyCrc16Modbus =
-        root.value(QStringLiteral("verifyCrc16Modbus")).toBool(false);
+    // 校验算法：新配置用 checksum 字段；旧配置只有 verifyCrc16Modbus 布尔量，
+    // 这里做一次向后兼容迁移。
+    if (root.contains(QStringLiteral("checksum"))) {
+        spec.frame.checksum =
+            static_cast<FrameChecksum>(root.value(QStringLiteral("checksum")).toInt(0));
+    } else if (root.value(QStringLiteral("verifyCrc16Modbus")).toBool(false)) {
+        spec.frame.checksum = FrameChecksum::Crc16Modbus;
+    } else {
+        spec.frame.checksum = FrameChecksum::None;
+    }
+    spec.frame.tail = QByteArray::fromHex(
+        root.value(QStringLiteral("tail")).toString().toLatin1());
+    spec.frame.tailMode = spec.frame.tail.isEmpty() ? FrameTailMode::None
+                                                    : FrameTailMode::Fixed;
     spec.frame.maxFrameLength =
         root.value(QStringLiteral("maxFrameLength")).toInt(4096);
     spec.bigEndian = root.value(QStringLiteral("bigEndian")).toBool(false);

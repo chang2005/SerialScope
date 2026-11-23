@@ -42,12 +42,14 @@ add_library(serial_core STATIC
     src/core/DataLogger.cpp
     src/core/QuickSend.cpp
     src/core/AutoReply.cpp
+    src/core/SequenceSender.cpp
     src/core/parser/HexCodec.cpp
     src/core/parser/AsciiValueParser.cpp
     src/core/parser/DataFrameParser.cpp
     src/core/parser/HexFieldExtractor.cpp
     src/core/parser/TextFilter.cpp
     src/core/parser/ControlCharVisualizer.cpp
+    src/core/parser/EncodingFixer.cpp
     src/utils/CrcCalculator.cpp
     src/utils/SettingsManager.cpp
 )
@@ -72,6 +74,8 @@ qt_add_executable(SerialScope
     src/ui/dialogs/AboutDialog.cpp
     src/ui/dialogs/AutoReplyDialog.cpp
     src/ui/dialogs/CrcToolDialog.cpp
+    src/ui/dialogs/EncodingFixDialog.cpp
+    src/ui/dialogs/SequenceDialog.cpp
     src/ui/dialogs/HexFieldConfigDialog.cpp
     resources/app.qrc
 )

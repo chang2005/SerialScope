@@ -83,6 +83,15 @@ quint8 CrcCalculator::xor8(const QByteArray &data)
     return value;
 }
 
+quint8 CrcCalculator::lrc8(const QByteArray &data)
+{
+    quint32 sum = 0;
+    for (const char c : data)
+        sum += static_cast<quint8>(c);
+    // Modbus ASCII 的 LRC：所有字节求和后取二进制补码
+    return static_cast<quint8>((~sum + 1) & 0xFF);
+}
+
 QByteArray CrcCalculator::appendChecksum(const QByteArray &payload, AppendMode mode)
 {
     QByteArray out = payload;
@@ -102,8 +111,33 @@ QByteArray CrcCalculator::appendChecksum(const QByteArray &payload, AppendMode m
     case AppendMode::Sum8:
         out.append(static_cast<char>(sum8(payload)));
         break;
+    case AppendMode::Xor8:
+        out.append(static_cast<char>(xor8(payload)));
+        break;
+    case AppendMode::Lrc8:
+        out.append(static_cast<char>(lrc8(payload)));
+        break;
     case AppendMode::None:
         break;
     }
     return out;
+}
+
+QString CrcCalculator::appendModeName(AppendMode mode)
+{
+    switch (mode) {
+    case AppendMode::Crc16Modbus:
+        return QStringLiteral("CRC16-Modbus");
+    case AppendMode::Crc16Ccitt:
+        return QStringLiteral("CRC16-CCITT");
+    case AppendMode::Sum8:
+        return QStringLiteral("Sum8");
+    case AppendMode::Xor8:
+        return QStringLiteral("Xor8");
+    case AppendMode::Lrc8:
+        return QStringLiteral("LRC8");
+    case AppendMode::None:
+        break;
+    }
+    return QStringLiteral("无");
 }
