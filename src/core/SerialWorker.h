@@ -38,6 +38,11 @@ public slots:
     /// 在工作线程中分块读取并发送文件（带流控，避免一次性塞入巨大的写缓冲）
     void sendFile(const QString &path);
     void cancelFileSend();
+    /// 设置自动重连：断线后按固定间隔尝试重新打开同一端口与参数
+    void setAutoReconnect(bool enabled);
+    /// 设置 DTR / RTS 控制线电平
+    void setDtr(bool on);
+    void setRts(bool on);
 
 signals:
     void portOpened(const QString &portName, qint32 baudRate);
@@ -54,12 +59,18 @@ signals:
     void fileSendProgress(qint64 sentBytes, qint64 totalBytes);
     void fileSendFinished(bool success, const QString &errorMessage);
 
+    /// 自动重连尝试的结果：attempt 为第几次尝试（从 1 开始）
+    void reconnectAttempted(int attempt, bool success, const QString &message);
+    /// DTR / RTS 当前电平
+    void controlLinesChanged(bool dtr, bool rts);
+
 private slots:
     void onReadyRead();
     void flushRxBuffer();
     void emitStats();
     void handleError(QSerialPort::SerialPortError error);
     void onBytesWritten(qint64 bytes);
+    void tryReconnect();
 
 private:
     void ensurePort();
@@ -67,6 +78,11 @@ private:
     void pumpFileWrite();
     void finishFileSend(bool success, const QString &message);
     void abortFileSend(const QString &message);
+    /// 按当前 m_lastConfig 重新打开端口；返回是否成功
+    bool openWithConfig(const SerialConfig &cfg, QString *error);
+    void scheduleReconnect();
+    void cancelReconnect();
+    void updateControlLines();
 
     QSerialPort *m_port = nullptr;
     QByteArray m_rxPending;
@@ -88,4 +104,14 @@ private:
     qint64 m_fileSent = 0;
     qint64 m_fileOutstanding = 0;
     QElapsedTimer m_fileProgressClock;
+
+    // 自动重连
+    QTimer m_reconnectTimer;
+    bool m_autoReconnect = false;
+    int m_reconnectAttempt = 0;
+    SerialConfig m_lastConfig;
+
+    // 控制线状态
+    bool m_dtr = false;
+    bool m_rts = false;
 };

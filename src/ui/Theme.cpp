@@ -91,6 +91,16 @@ QColor Theme::secondaryTextColor()
     return s_dark ? QColor("#8B949E") : QColor("#57606A");
 }
 
+QColor Theme::filterHighlightColor()
+{
+    return s_dark ? QColor("#5A3E00") : QColor("#FFF3C4");
+}
+
+QColor Theme::filterHighlightTextColor()
+{
+    return s_dark ? QColor("#FFD866") : QColor("#7A4B00");
+}
+
 QFont Theme::monospaceFont(int pointSize)
 {
     QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);

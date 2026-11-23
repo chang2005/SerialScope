@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <QWidget>
 
+class QCheckBox;
 class QComboBox;
 class QPushButton;
 class QToolButton;
@@ -26,9 +27,20 @@ public:
     void applyConfig(const SerialConfig &config);
     QString currentPortName() const;
 
+    /// 当前控制线与自动重连状态（用于打开串口时同步给工作线程）
+    bool dtrState() const;
+    bool rtsState() const;
+    bool autoReconnectEnabled() const;
+
 signals:
     void openRequested(const SerialConfig &config);
     void closeRequested();
+    /// DTR 电平变化
+    void dtrChanged(bool on);
+    /// RTS 电平变化
+    void rtsChanged(bool on);
+    /// 自动重连开关变化
+    void autoReconnectChanged(bool enabled);
 
 private slots:
     void onOpenClicked();
@@ -53,6 +65,9 @@ private:
     QComboBox *m_parityCombo = nullptr;
     QComboBox *m_stopBitsCombo = nullptr;
     QComboBox *m_flowCombo = nullptr;
+    QToolButton *m_dtrButton = nullptr;
+    QToolButton *m_rtsButton = nullptr;
+    QCheckBox *m_autoReconnectCheck = nullptr;
     QPushButton *m_openButton = nullptr;
     QStringList m_portSnapshot;
     qint32 m_committedBaud = 115200;

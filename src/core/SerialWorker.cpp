@@ -18,12 +18,17 @@ constexpr qint64 kMaxTxQueueBytes = 1024 * 1024;
 constexpr qint64 kFileChunkSize = 4096;
 constexpr qint64 kFileHighWater = 32 * 1024; // 待写入高水位（字节）
 constexpr int kFileProgressIntervalMs = 100;
+
+// 自动重连：首次 1 秒后重试，之后按 2 秒间隔持续尝试
+constexpr int kReconnectIntervalMs = 2000;
+constexpr int kReconnectFirstDelayMs = 1000;
 }
 
 SerialWorker::SerialWorker(QObject *parent)
     : QObject(parent)
     , m_flushTimer(this)
     , m_statsTimer(this)
+    , m_reconnectTimer(this)
 {
     m_flushTimer.setInterval(kFlushIntervalMs);
     m_flushTimer.setTimerType(Qt::CoarseTimer);
@@ -32,6 +37,10 @@ SerialWorker::SerialWorker(QObject *parent)
     m_statsTimer.setInterval(kStatsIntervalMs);
     m_statsTimer.setTimerType(Qt::CoarseTimer);
     connect(&m_statsTimer, &QTimer::timeout, this, &SerialWorker::emitStats);
+
+    // 自动重连定时器：单次触发式，由 tryReconnect() 决定是否继续
+    m_reconnectTimer.setSingleShot(true);
+    connect(&m_reconnectTimer, &QTimer::timeout, this, &SerialWorker::tryReconnect);
 }
 
 SerialWorker::~SerialWorker()
@@ -66,6 +75,7 @@ void SerialWorker::ensurePort()
 void SerialWorker::openPort(const SerialConfig &cfg)
 {
     abortFileSend(tr("重新打开端口，文件发送已取消"));
+    cancelReconnect();
 
     if (m_open)
         closeInternal(true);
@@ -75,6 +85,19 @@ void SerialWorker::openPort(const SerialConfig &cfg)
         return;
     }
 
+    QString error;
+    if (!openWithConfig(cfg, &error)) {
+        emit errorOccurred(error);
+        return;
+    }
+
+    // 记住这次的配置，供自动重连使用
+    m_lastConfig = cfg;
+    m_reconnectAttempt = 0;
+}
+
+bool SerialWorker::openWithConfig(const SerialConfig &cfg, QString *error)
+{
     ensurePort();
 
     m_port->setPortName(cfg.portName);
@@ -84,14 +107,16 @@ void SerialWorker::openPort(const SerialConfig &cfg)
         && m_port->setStopBits(cfg.stopBits)
         && m_port->setFlowControl(cfg.flowControl);
     if (!settingsOk) {
-        emit errorOccurred(tr("串口参数设置失败：%1").arg(m_port->errorString()));
-        return;
+        if (error)
+            *error = tr("串口参数设置失败：%1").arg(m_port->errorString());
+        return false;
     }
 
     if (!m_port->open(QIODevice::ReadWrite)) {
-        emit errorOccurred(tr("打开 %1 失败：%2")
-                               .arg(cfg.portName, m_port->errorString()));
-        return;
+        if (error)
+            *error = tr("打开 %1 失败：%2")
+                         .arg(cfg.portName, m_port->errorString());
+        return false;
     }
 
     m_port->clear(QSerialPort::AllDirections);
@@ -109,12 +134,17 @@ void SerialWorker::openPort(const SerialConfig &cfg)
     m_flushTimer.start();
     m_statsTimer.start();
 
+    // 恢复控制线电平
+    updateControlLines();
+
     emit portOpened(cfg.portName, cfg.baudRate);
     emit statsUpdated(m_txTotal, m_rxTotal);
+    return true;
 }
 
 void SerialWorker::closePort()
 {
+    cancelReconnect();
     closeInternal(true);
 }
 
@@ -251,9 +281,76 @@ void SerialWorker::handleError(QSerialPort::SerialPortError error)
             m_port->close();
         emit portLost(message);
         emit portClosed();
+        // 断线后若开启了自动重连，开始尝试恢复连接
+        scheduleReconnect();
     } else {
         emit errorOccurred(message);
     }
+}
+
+void SerialWorker::setAutoReconnect(bool enabled)
+{
+    m_autoReconnect = enabled;
+    if (!enabled)
+        cancelReconnect();
+}
+
+void SerialWorker::scheduleReconnect()
+{
+    if (!m_autoReconnect)
+        return;
+    if (m_lastConfig.portName.trimmed().isEmpty())
+        return;
+
+    m_reconnectAttempt = 0;
+    m_reconnectTimer.start(kReconnectFirstDelayMs);
+}
+
+void SerialWorker::cancelReconnect()
+{
+    m_reconnectTimer.stop();
+    m_reconnectAttempt = 0;
+}
+
+void SerialWorker::tryReconnect()
+{
+    if (!m_autoReconnect || m_open)
+        return;
+
+    m_reconnectAttempt += 1;
+
+    QString error;
+    if (openWithConfig(m_lastConfig, &error)) {
+        emit reconnectAttempted(m_reconnectAttempt, true, QString());
+        m_reconnectAttempt = 0;
+        return;
+    }
+
+    emit reconnectAttempted(m_reconnectAttempt, false, error);
+
+    // 继续尝试下一次
+    m_reconnectTimer.start(kReconnectIntervalMs);
+}
+
+void SerialWorker::setDtr(bool on)
+{
+    m_dtr = on;
+    updateControlLines();
+}
+
+void SerialWorker::setRts(bool on)
+{
+    m_rts = on;
+    updateControlLines();
+}
+
+void SerialWorker::updateControlLines()
+{
+    if (m_port && m_port->isOpen()) {
+        m_port->setDataTerminalReady(m_dtr);
+        m_port->setRequestToSend(m_rts);
+    }
+    emit controlLinesChanged(m_dtr, m_rts);
 }
 
 void SerialWorker::sendFile(const QString &path)

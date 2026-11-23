@@ -1,7 +1,11 @@
+#include "core/AutoReply.h"
+#include "core/QuickSend.h"
 #include "core/parser/AsciiValueParser.h"
+#include "core/parser/ControlCharVisualizer.h"
 #include "core/parser/DataFrameParser.h"
 #include "core/parser/HexCodec.h"
 #include "core/parser/HexFieldExtractor.h"
+#include "core/parser/TextFilter.h"
 #include "utils/CrcCalculator.h"
 
 #include <QTest>
@@ -38,6 +42,29 @@ private slots:
     void fieldExtractorLittleEndian();
     void fieldExtractorBigEndian();
     void fieldExtractorOutOfRange();
+
+    void filterInactiveMatchesEverything();
+    void filterPlainTextCaseInsensitive();
+    void filterMultipleOccurrences();
+    void filterRegexMode();
+    void filterInvalidRegexFallsBack();
+    void filterHighlightMarkers();
+
+    void controlCharsEscapeCommon();
+    void controlCharsEscapeAll();
+    void controlCharsPlainTextUnchanged();
+
+    void quickSendAddAndFind();
+    void quickSendOverwriteSameName();
+    void quickSendRemove();
+    void quickSendJsonRoundTrip();
+
+    void autoReplyMatchesPlainText();
+    void autoReplyRegex();
+    void autoReplyFirstMatchWins();
+    void autoReplyEscapes();
+    void autoReplyHexPayload();
+    void autoReplyJsonRoundTrip();
 };
 
 void TestCore::crcVectors()
@@ -457,6 +484,307 @@ void TestCore::fieldExtractorOutOfRange()
     QVERIFY(std::isnan(values.at(1)));
     QVERIFY(std::isnan(values.at(2)));
     QVERIFY(std::isnan(values.at(3)));
+}
+
+// ---------------------------------------------------------------- 文本过滤
+
+void TestCore::filterInactiveMatchesEverything()
+{
+    TextFilter filter;
+    QVERIFY(!filter.isActive());
+    QVERIFY(filter.matchesLine(QStringLiteral("anything")));
+
+    filter.setPattern(QString(), false);
+    QVERIFY(!filter.isActive());
+    QVERIFY(filter.matchesLine(QStringLiteral("anything")));
+}
+
+void TestCore::filterPlainTextCaseInsensitive()
+{
+    TextFilter filter;
+    QVERIFY(filter.setPattern(QStringLiteral("err"), false));
+
+    const QList<QPair<int, int>> ranges =
+        filter.matchRanges(QStringLiteral("ERR value"));
+    QCOMPARE(ranges.size(), 1);
+    QCOMPARE(ranges.first().first, 0);
+    QCOMPARE(ranges.first().second, 3);
+
+    QVERIFY(filter.matchesLine(QStringLiteral("some ERROR here")));
+    QVERIFY(!filter.matchesLine(QStringLiteral("all good")));
+}
+
+void TestCore::filterMultipleOccurrences()
+{
+    TextFilter filter;
+    filter.setPattern(QStringLiteral("ab"), false);
+
+    const QList<QPair<int, int>> ranges =
+        filter.matchRanges(QStringLiteral("abXXab"));
+    QCOMPARE(ranges.size(), 2);
+    QCOMPARE(ranges.at(0).first, 0);
+    QCOMPARE(ranges.at(0).second, 2);
+    QCOMPARE(ranges.at(1).first, 4);
+    QCOMPARE(ranges.at(1).second, 6);
+}
+
+void TestCore::filterRegexMode()
+{
+    TextFilter filter;
+    QVERIFY(filter.setPattern(QStringLiteral("t\\d+"), true));
+
+    const QList<QPair<int, int>> ranges =
+        filter.matchRanges(QStringLiteral("t12 and t345"));
+    QCOMPARE(ranges.size(), 2);
+    QCOMPARE(ranges.at(0).first, 0);
+    QCOMPARE(ranges.at(0).second, 3);
+    QCOMPARE(ranges.at(1).first, 8);
+    QCOMPARE(ranges.at(1).second, 12);
+}
+
+void TestCore::filterInvalidRegexFallsBack()
+{
+    TextFilter filter;
+    // 非法正则：setPattern 返回 false，过滤器退回普通文本模式
+    QVERIFY(!filter.setPattern(QStringLiteral("[unclosed"), true));
+    QVERIFY(filter.isActive());
+
+    // 退回后按纯文本匹配 "[unclosed"
+    const QList<QPair<int, int>> ranges =
+        filter.matchRanges(QStringLiteral("x [unclosed y"));
+    QCOMPARE(ranges.size(), 1);
+    QCOMPARE(ranges.first().first, 2);
+    QCOMPARE(ranges.first().second, 11);
+}
+
+void TestCore::filterHighlightMarkers()
+{
+    TextFilter filter;
+    filter.setPattern(QStringLiteral("ok"), false);
+
+    const QList<QPair<int, int>> ranges =
+        filter.matchRanges(QStringLiteral("say ok now"));
+    const QString marked = TextFilter::highlightMarkers(QStringLiteral("say ok now"), ranges);
+    QCOMPARE(marked, QStringLiteral("say <mark>ok</mark> now"));
+}
+
+// ------------------------------------------------------------ 控制字符转义
+
+void TestCore::controlCharsEscapeCommon()
+{
+    ControlCharVisualizer visualizer(false);
+
+    QCOMPARE(visualizer.escape(QStringLiteral("a\r\nb")),
+             QStringLiteral("a<CR><LF>b"));
+    QCOMPARE(visualizer.escape(QStringLiteral("x\ty")),
+             QStringLiteral("x<TAB>y"));
+}
+
+void TestCore::controlCharsEscapeAll()
+{
+    ControlCharVisualizer visualizer(true);
+
+    QCOMPARE(visualizer.escape(QStringLiteral("\x01")),
+             QStringLiteral("<0x01>"));
+    QCOMPARE(visualizer.escape(QStringLiteral("\x7F")),
+             QStringLiteral("<DEL>"));
+    // 常见字符在 showAll 模式下同样保持一致
+    QCOMPARE(visualizer.escape(QStringLiteral("\r")), QStringLiteral("<CR>"));
+}
+
+void TestCore::controlCharsPlainTextUnchanged()
+{
+    ControlCharVisualizer visualizer(true);
+
+    const QString plain = QStringLiteral("hello world");
+    QCOMPARE(visualizer.escape(plain), plain);
+    QCOMPARE(visualizer.escape(QString()), QString());
+}
+
+// ------------------------------------------------------------ 快捷发送清单
+
+void TestCore::quickSendAddAndFind()
+{
+    QuickSendList list;
+    QVERIFY(list.isEmpty());
+
+    QuickSendItem item;
+    item.name = QStringLiteral("PING");
+    item.payload = QStringLiteral("AT+PING");
+    QVERIFY(list.add(item));
+    QCOMPARE(list.count(), 1);
+
+    const QuickSendItem *found = list.find(QStringLiteral("PING"));
+    QVERIFY(found != nullptr);
+    QCOMPARE(found->payload, QStringLiteral("AT+PING"));
+
+    // 空负载不加入
+    QuickSendItem empty;
+    empty.name = QStringLiteral("X");
+    QVERIFY(!list.add(empty));
+
+    // 名称缺省时用负载前 12 字符
+    QuickSendItem noName;
+    noName.payload = QStringLiteral("ABCDEFGHIJKLMNOP");
+    QVERIFY(list.add(noName));
+    QVERIFY(list.find(QStringLiteral("ABCDEFGHIJKL")) != nullptr);
+}
+
+void TestCore::quickSendOverwriteSameName()
+{
+    QuickSendList list;
+    QuickSendItem item;
+    item.name = QStringLiteral("A");
+    item.payload = QStringLiteral("one");
+    QVERIFY(list.add(item));
+
+    item.payload = QStringLiteral("two");
+    QVERIFY(list.add(item));
+    QCOMPARE(list.count(), 1);
+    QCOMPARE(list.find(QStringLiteral("A"))->payload, QStringLiteral("two"));
+}
+
+void TestCore::quickSendRemove()
+{
+    QuickSendList list;
+    QuickSendItem item;
+    item.name = QStringLiteral("A");
+    item.payload = QStringLiteral("one");
+    QVERIFY(list.add(item));
+
+    QVERIFY(list.remove(QStringLiteral("A")));
+    QCOMPARE(list.count(), 0);
+    QVERIFY(!list.remove(QStringLiteral("A")));
+}
+
+void TestCore::quickSendJsonRoundTrip()
+{
+    QuickSendList list;
+    QuickSendItem a;
+    a.name = QStringLiteral("PING");
+    a.payload = QStringLiteral("AT+PING");
+    list.add(a);
+    QuickSendItem b;
+    b.name = QStringLiteral("RESET");
+    b.payload = QStringLiteral("AA 55 01");
+    b.hex = true;
+    list.add(b);
+
+    const QString json = list.toJson();
+    QuickSendList restored;
+    QVERIFY(restored.fromJson(json));
+    QCOMPARE(restored.count(), 2);
+    QCOMPARE(restored.find(QStringLiteral("RESET"))->hex, true);
+    QCOMPARE(restored.find(QStringLiteral("PING"))->payload, QStringLiteral("AT+PING"));
+
+    // 非法 JSON 不改变内容
+    QuickSendList other;
+    QVERIFY(!other.fromJson(QStringLiteral("{not json")));
+    QVERIFY(other.isEmpty());
+}
+
+// -------------------------------------------------------------- 自动回复
+
+void TestCore::autoReplyMatchesPlainText()
+{
+    AutoReplyEngine engine;
+    AutoReplyRule rule;
+    rule.name = QStringLiteral("ping");
+    rule.matchPattern = QStringLiteral("PING");
+    rule.replyPayload = QStringLiteral("PONG");
+    QVERIFY(engine.addRule(rule));
+
+    AutoReplyRule found;
+    QByteArray reply;
+    QVERIFY(engine.match(QByteArray("AT+PING\r\n"), &found, &reply));
+    QCOMPARE(found.name, QStringLiteral("ping"));
+    QCOMPARE(reply, QByteArray("PONG"));
+
+    QVERIFY(!engine.match(QByteArray("AT+OTHER"), &found, &reply));
+}
+
+void TestCore::autoReplyRegex()
+{
+    AutoReplyEngine engine;
+    AutoReplyRule rule;
+    rule.name = QStringLiteral("cmd");
+    rule.matchPattern = QStringLiteral("^AT\\+(\\w+)$");
+    rule.replyPayload = QStringLiteral("OK");
+    rule.useRegex = true;
+    QVERIFY(engine.addRule(rule));
+
+    QByteArray reply;
+    QVERIFY(engine.match(QByteArray("AT+RESET"), nullptr, &reply));
+    QCOMPARE(reply, QByteArray("OK"));
+    QVERIFY(!engine.match(QByteArray("XX+RESET"), nullptr, &reply));
+}
+
+void TestCore::autoReplyFirstMatchWins()
+{
+    AutoReplyEngine engine;
+    AutoReplyRule first;
+    first.name = QStringLiteral("first");
+    first.matchPattern = QStringLiteral("A");
+    first.replyPayload = QStringLiteral("1");
+    engine.addRule(first);
+
+    AutoReplyRule second;
+    second.name = QStringLiteral("second");
+    second.matchPattern = QStringLiteral("A");
+    second.replyPayload = QStringLiteral("2");
+    engine.addRule(second);
+
+    AutoReplyRule found;
+    QByteArray reply;
+    QVERIFY(engine.match(QByteArray("A"), &found, &reply));
+    QCOMPARE(found.name, QStringLiteral("first"));
+    QCOMPARE(reply, QByteArray("1"));
+}
+
+void TestCore::autoReplyEscapes()
+{
+    QCOMPARE(AutoReplyEngine::expandEscapes(QStringLiteral("a\\r\\nb")),
+             QByteArray("a\r\nb"));
+    QCOMPARE(AutoReplyEngine::expandEscapes(QStringLiteral("x\\ty")),
+             QByteArray("x\ty"));
+    QCOMPARE(AutoReplyEngine::expandEscapes(QStringLiteral("\\x41")),
+             QByteArray("A"));
+    QCOMPARE(AutoReplyEngine::expandEscapes(QStringLiteral("a\\\\b")),
+             QByteArray("a\\b"));
+}
+
+void TestCore::autoReplyHexPayload()
+{
+    AutoReplyEngine engine;
+    AutoReplyRule rule;
+    rule.name = QStringLiteral("hex");
+    rule.matchPattern = QStringLiteral("REQ");
+    rule.replyPayload = QStringLiteral("AA 55 01");
+    rule.replyIsHex = true;
+    QVERIFY(engine.addRule(rule));
+
+    QByteArray reply;
+    QVERIFY(engine.match(QByteArray("REQ"), nullptr, &reply));
+    QCOMPARE(reply, QByteArray::fromHex("AA5501"));
+}
+
+void TestCore::autoReplyJsonRoundTrip()
+{
+    AutoReplyEngine engine;
+    AutoReplyRule rule;
+    rule.name = QStringLiteral("ping");
+    rule.matchPattern = QStringLiteral("PING");
+    rule.replyPayload = QStringLiteral("PONG");
+    rule.useRegex = false;
+    engine.addRule(rule);
+
+    const QString json = engine.toJson();
+    AutoReplyEngine restored;
+    QVERIFY(restored.fromJson(json));
+    QCOMPARE(restored.count(), 1);
+    QCOMPARE(restored.rules().first().replyPayload, QStringLiteral("PONG"));
+
+    QVERIFY(!restored.fromJson(QStringLiteral("[]not json")));
 }
 
 QTEST_GUILESS_MAIN(TestCore)

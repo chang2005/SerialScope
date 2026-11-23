@@ -2,6 +2,7 @@
 
 #include "core/parser/HexCodec.h"
 #include "ui/Theme.h"
+#include "ui/WidgetUtil.h"
 #include "utils/CrcCalculator.h"
 #include "utils/SettingsManager.h"
 
@@ -20,15 +21,14 @@
 #include <QSpinBox>
 #include <QStyle>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace {
 
 void repolish(QWidget *widget)
 {
-    widget->style()->unpolish(widget);
-    widget->style()->polish(widget);
-    widget->update();
+    WidgetUtil::repolish(widget);
 }
 
 QLabel *makeMutedLabel(const QString &text, QWidget *parent)
@@ -68,6 +68,9 @@ SendPanel::SendPanel(QWidget *parent)
     connect(m_countSpin, &QSpinBox::valueChanged, this, [this] { saveSettings(); });
     connect(m_historyCombo, &QComboBox::activated, this, &SendPanel::onHistoryActivated);
     connect(m_fileButton, &QPushButton::clicked, this, &SendPanel::onFileClicked);
+    connect(m_convertButton, &QToolButton::clicked, this, &SendPanel::onConvertClicked);
+    connect(m_quickSendSaveButton, &QToolButton::clicked, this, &SendPanel::onQuickSendSave);
+    connect(m_quickSendDeleteButton, &QToolButton::clicked, this, &SendPanel::onQuickSendDelete);
 
     auto *sendShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Return")), this);
     sendShortcut->setContext(Qt::WidgetWithChildrenShortcut);
@@ -128,6 +131,13 @@ void SendPanel::setupUi()
     m_checksumCombo->setFixedWidth(132);
     m_checksumCombo->setToolTip(tr("校验值附加在数据末尾、行尾之前；Modbus 低字节在前，CCITT 高字节在前"));
     controls->addWidget(m_checksumCombo);
+
+    m_convertButton = new QToolButton(this);
+    m_convertButton->setObjectName(QStringLiteral("convertButton"));
+    m_convertButton->setText(tr("互转"));
+    m_convertButton->setToolTip(
+        tr("在文本与 HEX 之间互转：文本转 HEX，或把 HEX 反解为文本"));
+    controls->addWidget(m_convertButton);
 
     controls->addStretch(1);
 
@@ -195,6 +205,30 @@ void SendPanel::setupUi()
     inputRow->addLayout(buttonColumn);
     layout->addLayout(inputRow);
 
+    // ---- 快捷发送栏 ----
+    m_quickSendBar = new QWidget(this);
+    auto *quickLayout = new QHBoxLayout(m_quickSendBar);
+    quickLayout->setContentsMargins(0, 0, 0, 0);
+    quickLayout->setSpacing(6);
+
+    auto *quickLabel = makeMutedLabel(tr("快捷"), m_quickSendBar);
+    quickLayout->addWidget(quickLabel);
+
+    m_quickSendSaveButton = new QToolButton(m_quickSendBar);
+    m_quickSendSaveButton->setText(tr("保存当前"));
+    m_quickSendSaveButton->setToolTip(
+        tr("把当前输入框的内容保存为一条快捷发送"));
+    quickLayout->addWidget(m_quickSendSaveButton);
+
+    m_quickSendDeleteButton = new QToolButton(m_quickSendBar);
+    m_quickSendDeleteButton->setText(tr("删除"));
+    m_quickSendDeleteButton->setToolTip(tr("删除选中的快捷发送条目"));
+    m_quickSendDeleteButton->setEnabled(false);
+    quickLayout->addWidget(m_quickSendDeleteButton);
+
+    quickLayout->addStretch(1);
+    layout->addWidget(m_quickSendBar);
+
     auto *footer = new QHBoxLayout();
     footer->setContentsMargins(0, 0, 0, 0);
     footer->setSpacing(8);
@@ -221,6 +255,7 @@ void SendPanel::restoreSettings()
     m_countSpin->setValue(s->value(QStringLiteral("count"), 0).toInt());
     m_history = s->value(QStringLiteral("history")).toStringList();
     const QString draft = s->value(QStringLiteral("draft")).toString();
+    const QString quickJson = s->value(QStringLiteral("quickSends")).toString();
     s->endGroup();
 
     m_modeCombo->setCurrentIndex(hex ? 1 : 0);
@@ -231,6 +266,10 @@ void SendPanel::restoreSettings()
     m_checksumCombo->setCurrentIndex(qBound(0, checksum, m_checksumCombo->count() - 1));
     m_input->setPlainText(draft);
     rebuildHistoryCombo();
+
+    if (!quickJson.isEmpty())
+        m_quickSends.fromJson(quickJson);
+    rebuildQuickSendButtons();
 }
 
 void SendPanel::saveSettings()
@@ -245,6 +284,7 @@ void SendPanel::saveSettings()
     s->setValue(QStringLiteral("count"), m_countSpin->value());
     s->setValue(QStringLiteral("history"), m_history);
     s->setValue(QStringLiteral("draft"), m_input->toPlainText());
+    s->setValue(QStringLiteral("quickSends"), m_quickSends.toJson());
     s->endGroup();
 }
 
@@ -297,7 +337,7 @@ bool SendPanel::validateInput(QString *error) const
     return true;
 }
 
-bool SendPanel::buildPayload(QByteArray *payload, QString *error) const
+bool SendPanel::buildRawPayload(QByteArray *payload, QString *error) const
 {
     const QString text = m_input->toPlainText();
     if (text.isEmpty()) {
@@ -305,18 +345,181 @@ bool SendPanel::buildPayload(QByteArray *payload, QString *error) const
         return false;
     }
 
-    QByteArray data;
     if (m_hexMode) {
         QString hexError;
-        data = HexCodec::parseHex(text, &hexError);
+        const QByteArray parsed = HexCodec::parseHex(text, &hexError);
         if (!hexError.isEmpty()) {
             *error = tr("HEX 错误：%1").arg(hexError);
             return false;
         }
+        *payload = parsed;
     } else {
         const TextEncoding enc = static_cast<TextEncoding>(m_encodingCombo->currentData().toInt());
-        data = HexCodec::encode(text, enc);
+        *payload = HexCodec::encode(text, enc);
     }
+    return true;
+}
+
+void SendPanel::onConvertClicked()
+{
+    const QString text = m_input->toPlainText().trimmed();
+    if (text.isEmpty()) {
+        setHint(tr("没有可转换的内容"), true);
+        return;
+    }
+
+    if (m_hexMode) {
+        // HEX → 文本
+        QString hexError;
+        const QByteArray raw = HexCodec::parseHex(text, &hexError);
+        if (!hexError.isEmpty()) {
+            setHint(tr("HEX 错误：%1").arg(hexError), true);
+            return;
+        }
+        const TextEncoding enc = static_cast<TextEncoding>(m_encodingCombo->currentData().toInt());
+        const QString decoded = HexCodec::decode(raw, enc);
+        m_modeCombo->setCurrentIndex(0);
+        m_input->setPlainText(decoded);
+        setHint(tr("已把 HEX 转换为文本（%1 字节）").arg(raw.size()), false);
+    } else {
+        // 文本 → HEX
+        const TextEncoding enc = static_cast<TextEncoding>(m_encodingCombo->currentData().toInt());
+        const QByteArray raw = HexCodec::encode(text, enc);
+        m_modeCombo->setCurrentIndex(1);
+        m_input->setPlainText(HexCodec::formatHex(raw));
+        setHint(tr("已把文本转换为 HEX（%1 字节）").arg(raw.size()), false);
+    }
+}
+
+QuickSendItem SendPanel::currentQuickSendItem() const
+{
+    QuickSendItem item;
+    item.payload = m_input->toPlainText().trimmed();
+    item.hex = m_hexMode;
+    return item;
+}
+
+void SendPanel::onQuickSendSave()
+{
+    QuickSendItem item = currentQuickSendItem();
+    if (!item.isValid()) {
+        setHint(tr("输入框内容为空，无法保存快捷发送"), true);
+        return;
+    }
+
+    // 名称取输入内容的前若干字符；重复时覆盖
+    item.name = item.payload.left(12);
+    if (item.hex)
+        item.name = item.payload.left(12);
+
+    if (!m_quickSends.add(item)) {
+        setHint(tr("保存快捷发送失败"), true);
+        return;
+    }
+
+    rebuildQuickSendButtons();
+    saveSettings();
+    setHint(tr("已保存快捷发送：%1").arg(item.name), false);
+}
+
+void SendPanel::onQuickSendDelete()
+{
+    // 删除最后点击的快捷按钮
+    for (int i = 0; i < m_quickSendButtons.size(); ++i) {
+        QPushButton *button = m_quickSendButtons.at(i);
+        if (!button->property("selected").toBool())
+            continue;
+        if (m_quickSends.remove(button->property("name").toString())) {
+            rebuildQuickSendButtons();
+            saveSettings();
+            setHint(tr("已删除快捷发送：%1").arg(button->property("name").toString()), false);
+        }
+        return;
+    }
+}
+
+void SendPanel::onQuickSendClicked()
+{
+    auto *button = qobject_cast<QPushButton *>(sender());
+    if (!button)
+        return;
+
+    const QString name = button->property("name").toString();
+    const QuickSendItem *item = m_quickSends.find(name);
+    if (!item)
+        return;
+
+    // 标记选中状态，供"删除"按钮使用
+    for (QPushButton *other : m_quickSendButtons)
+        other->setProperty("selected", other == button);
+    m_quickSendDeleteButton->setEnabled(true);
+
+    // 点击即发送该条目
+    QByteArray payload;
+    if (item->hex) {
+        QString hexError;
+        payload = HexCodec::parseHex(item->payload, &hexError);
+        if (!hexError.isEmpty()) {
+            setHint(tr("快捷发送 %1 的 HEX 无效：%2").arg(name, hexError), true);
+            return;
+        }
+    } else {
+        const TextEncoding enc = static_cast<TextEncoding>(m_encodingCombo->currentData().toInt());
+        payload = HexCodec::encode(item->payload, enc);
+    }
+
+    if (!m_portOpen) {
+        setHint(tr("串口未打开"), true);
+        return;
+    }
+
+    emit dataToSend(payload);
+    emit statusMessage(tr("已发送 %1 字节（快捷：%2）").arg(payload.size()).arg(name));
+}
+
+void SendPanel::rebuildQuickSendButtons()
+{
+    // 清掉旧的快捷按钮（保留"快捷"标签与保存/删除按钮）
+    for (QPushButton *button : m_quickSendButtons) {
+        if (auto *layout = qobject_cast<QHBoxLayout *>(m_quickSendBar->layout()))
+            layout->removeWidget(button);
+        button->deleteLater();
+    }
+    m_quickSendButtons.clear();
+    m_quickSendDeleteButton->setEnabled(false);
+
+    auto *layout = qobject_cast<QHBoxLayout *>(m_quickSendBar->layout());
+    if (!layout)
+        return;
+
+    // 重新插入到"删除"按钮之后：找到删除按钮在布局中的位置
+    int insertIndex = layout->count();
+    for (int i = 0; i < layout->count(); ++i) {
+        QLayoutItem *item = layout->itemAt(i);
+        QWidget *widget = item ? item->widget() : nullptr;
+        if (widget == m_quickSendDeleteButton) {
+            insertIndex = i + 1;
+            break;
+        }
+    }
+
+    for (const QuickSendItem &item : m_quickSends.items()) {
+        auto *button = new QPushButton(item.name, m_quickSendBar);
+        button->setProperty("name", item.name);
+        button->setProperty("selected", false);
+        button->setToolTip(tr("点击立即发送：%1").arg(item.payload));
+        button->setMaximumWidth(140);
+        connect(button, &QPushButton::clicked, this, &SendPanel::onQuickSendClicked);
+        layout->insertWidget(insertIndex++, button);
+        m_quickSendButtons.append(button);
+    }
+}
+
+bool SendPanel::buildPayload(QByteArray *payload, QString *error) const
+{
+    QByteArray data;
+    if (!buildRawPayload(&data, error))
+        return false;
 
     const auto checksum = static_cast<CrcCalculator::AppendMode>(
         m_checksumCombo->currentData().toInt());

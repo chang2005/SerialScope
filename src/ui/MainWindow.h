@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/AutoReply.h"
 #include "core/SerialConfig.h"
 
 #include <QMainWindow>
@@ -16,6 +17,7 @@ class SendPanel;
 class WaveformPanel;
 class SerialWorker;
 class DataLogger;
+class AutoReplyDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -34,6 +36,8 @@ private slots:
     void onRxDataAvailable();
     void onStatsUpdated(qint64 txBytes, qint64 rxBytes);
     void onSendEcho(const QByteArray &data);
+    void onReconnectAttempted(int attempt, bool success, const QString &message);
+    void onControlLinesChanged(bool dtr, bool rts);
 
     void onLogActionToggled(bool enabled);
     void onAutoLogToggled(bool enabled);
@@ -45,6 +49,8 @@ private slots:
 
     void toggleTheme(bool dark);
     void showCrcTool();
+    void showAutoReplyRules();
+    void onAutoReplyToggled(bool enabled);
     void showAbout();
     void updateRates();
     void refreshHotplug();
@@ -65,6 +71,8 @@ private:
     void updateLogLabel();
     void beginLog(const QString &path, bool automatic);
     void endLog();
+    void saveAutoReplyRules();
+    void restoreAutoReplyRules();
     QString makeLogPath(const QString &portName) const;
     QString configSummary(const SerialConfig &config) const;
     void showStatus(const QString &message);
@@ -85,6 +93,12 @@ private:
     QAction *m_autoLogAction = nullptr;
     QAction *m_themeAction = nullptr;
     QAction *m_crcAction = nullptr;
+    QAction *m_autoReplyAction = nullptr;
+
+    // 自动回复
+    AutoReplyEngine m_autoReplyRules;
+    AutoReplyDialog *m_autoReplyDialog = nullptr;
+    bool m_autoReplyEnabled = true;
 
     QLabel *m_connLabel = nullptr;
     QLabel *m_txLabel = nullptr;

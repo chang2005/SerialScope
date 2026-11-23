@@ -20,6 +20,10 @@ public:
     static QColor rxColor();
     static QColor txColor();
     static QColor secondaryTextColor();
+    /// 过滤命中片段的高亮底色
+    static QColor filterHighlightColor();
+    /// 过滤命中片段的高亮文字色
+    static QColor filterHighlightTextColor();
 
     static QFont monospaceFont(int pointSize = 10);
 

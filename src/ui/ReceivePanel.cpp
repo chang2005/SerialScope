@@ -1,6 +1,7 @@
 #include "ui/ReceivePanel.h"
 
 #include "ui/Theme.h"
+#include "ui/WidgetUtil.h"
 #include "utils/SettingsManager.h"
 
 #include <QCheckBox>
@@ -11,9 +12,11 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QSettings>
+#include <QStyle>
 #include <QTextCharFormat>
 #include <QTextCursor>
 #include <QToolButton>
@@ -38,6 +41,10 @@ ReceivePanel::ReceivePanel(QWidget *parent)
     });
     connect(m_timestampCheck, &QCheckBox::toggled, this, [this] { saveSettings(); });
     connect(m_autoScrollCheck, &QCheckBox::toggled, this, [this] { saveSettings(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, &ReceivePanel::onFilterChanged);
+    connect(m_filterRegexButton, &QToolButton::toggled, this, &ReceivePanel::onFilterModeToggled);
+    connect(m_showControlCharsCheck, &QCheckBox::toggled, this,
+            &ReceivePanel::onShowControlCharsToggled);
 }
 
 ReceivePanel::~ReceivePanel()
@@ -85,8 +92,6 @@ void ReceivePanel::setupUi()
     m_showTxCheck->setChecked(true);
     toolbar->addWidget(m_showTxCheck);
 
-    toolbar->addStretch(1);
-
     m_pauseButton = new QToolButton(this);
     m_pauseButton->setText(tr("暂停"));
     m_pauseButton->setCheckable(true);
@@ -105,6 +110,35 @@ void ReceivePanel::setupUi()
     toolbar->addWidget(saveButton);
 
     layout->addLayout(toolbar);
+
+    // ---- 过滤与不可见字符：单独一行，避免把上面的工具栏挤扁 ----
+    auto *filterRow = new QHBoxLayout();
+    filterRow->setContentsMargins(0, 0, 0, 0);
+    filterRow->setSpacing(8);
+
+    auto *filterLabel = new QLabel(tr("过滤"), this);
+    filterLabel->setProperty("muted", true);
+    filterRow->addWidget(filterLabel);
+
+    m_filterEdit = new QLineEdit(this);
+    m_filterEdit->setPlaceholderText(tr("关键词或正则"));
+    m_filterEdit->setClearButtonEnabled(true);
+    m_filterEdit->setMinimumWidth(140);
+    m_filterEdit->setToolTip(tr("只显示包含该关键词的行；命中片段会高亮"));
+    filterRow->addWidget(m_filterEdit, 1);
+
+    m_filterRegexButton = new QToolButton(this);
+    m_filterRegexButton->setText(QStringLiteral(".*"));
+    m_filterRegexButton->setCheckable(true);
+    m_filterRegexButton->setToolTip(tr("按正则表达式过滤"));
+    filterRow->addWidget(m_filterRegexButton);
+
+    m_showControlCharsCheck = new QCheckBox(tr("控制字符"), this);
+    m_showControlCharsCheck->setToolTip(
+        tr("把 \\r \\n \\t 等不可见字符显示为 <CR> <LF> <TAB>"));
+    filterRow->addWidget(m_showControlCharsCheck);
+
+    layout->addLayout(filterRow);
 
     m_view = new QPlainTextEdit(this);
     m_view->setReadOnly(true);
@@ -126,6 +160,11 @@ void ReceivePanel::restoreSettings()
     m_timestampCheck->setChecked(s->value(QStringLiteral("timestamps"), true).toBool());
     m_autoScrollCheck->setChecked(s->value(QStringLiteral("autoScroll"), true).toBool());
     m_showTxCheck->setChecked(s->value(QStringLiteral("showTx"), true).toBool());
+    m_showControlCharsCheck->setChecked(
+        s->value(QStringLiteral("showControlChars"), false).toBool());
+    m_controlChars.setShowsAll(m_showControlCharsCheck->isChecked());
+    const bool filterRegex = s->value(QStringLiteral("filterRegex"), false).toBool();
+    const QString filterText = s->value(QStringLiteral("filterText")).toString();
     s->endGroup();
 
     m_modeCombo->blockSignals(true);
@@ -138,6 +177,15 @@ void ReceivePanel::restoreSettings()
     m_encodingCombo->blockSignals(false);
 
     m_encodingCombo->setEnabled(!m_hexMode);
+
+    // 过滤器：先恢复正则开关，再恢复关键词，最后统一应用
+    m_filterRegexButton->blockSignals(true);
+    m_filterRegexButton->setChecked(filterRegex);
+    m_filterRegexButton->blockSignals(false);
+    m_filterEdit->blockSignals(true);
+    m_filterEdit->setText(filterText);
+    m_filterEdit->blockSignals(false);
+    m_filter.setPattern(filterText, filterRegex);
 }
 
 void ReceivePanel::saveSettings()
@@ -149,6 +197,9 @@ void ReceivePanel::saveSettings()
     s->setValue(QStringLiteral("timestamps"), m_timestampCheck->isChecked());
     s->setValue(QStringLiteral("autoScroll"), m_autoScrollCheck->isChecked());
     s->setValue(QStringLiteral("showTx"), m_showTxCheck->isChecked());
+    s->setValue(QStringLiteral("showControlChars"), m_showControlCharsCheck->isChecked());
+    s->setValue(QStringLiteral("filterText"), m_filterEdit->text());
+    s->setValue(QStringLiteral("filterRegex"), m_filterRegexButton->isChecked());
     s->endGroup();
 }
 
@@ -215,6 +266,10 @@ void ReceivePanel::appendData(const QByteArray &data, bool tx)
         if (decoded.isEmpty())
             return;
 
+        // 控制字符可视化：把 \r \n \t 显示为 <CR> <LF> <TAB>
+        if (m_showControlCharsCheck->isChecked())
+            decoded = m_controlChars.escape(decoded);
+
         if (!prefix.isEmpty()) {
             text = prefix + decoded;
             if (!text.endsWith(QLatin1Char('\n')) && !text.endsWith(QLatin1Char('\r')))
@@ -228,7 +283,7 @@ void ReceivePanel::appendData(const QByteArray &data, bool tx)
         return;
 
     // RX 不指定颜色，让文本跟随调色板，切换深浅主题时仍保持可读
-    insertText(text, tx ? Theme::txColor() : QColor());
+    insertFilteredText(text, tx ? Theme::txColor() : QColor());
 }
 
 void ReceivePanel::insertText(const QString &text, const QColor &color)
@@ -242,6 +297,62 @@ void ReceivePanel::insertText(const QString &text, const QColor &color)
     if (color.isValid())
         format.setForeground(color);
     cursor.insertText(text, format);
+
+    if (autoScroll)
+        m_view->verticalScrollBar()->setValue(m_view->verticalScrollBar()->maximum());
+    else
+        m_view->verticalScrollBar()->setValue(scrollValue);
+}
+
+void ReceivePanel::insertFilteredText(const QString &text, const QColor &color)
+{
+    if (!m_filter.isActive()) {
+        insertText(text, color);
+        return;
+    }
+
+    // 逐行过滤：只保留含命中片段的行，并对命中片段着色。
+    const QStringList lines = text.split(QLatin1Char('\n'));
+
+    QTextCharFormat baseFormat;
+    if (color.isValid())
+        baseFormat.setForeground(color);
+
+    QTextCharFormat hitFormat = baseFormat;
+    hitFormat.setBackground(Theme::filterHighlightColor());
+    hitFormat.setForeground(Theme::filterHighlightTextColor());
+
+    const int scrollValue = m_view->verticalScrollBar()->value();
+    const bool autoScroll = m_autoScrollCheck->isChecked();
+
+    QTextCursor cursor(m_view->document());
+    cursor.movePosition(QTextCursor::End);
+
+    bool wroteAny = false;
+    for (const QString &rawLine : lines) {
+        QString line = rawLine;
+        if (line.endsWith(QLatin1Char('\r')))
+            line.chop(1);
+
+        const QList<QPair<int, int>> ranges = m_filter.matchRanges(line);
+        if (ranges.isEmpty())
+            continue;
+
+        wroteAny = true;
+        int pos = 0;
+        for (const QPair<int, int> &range : ranges) {
+            if (range.first > pos)
+                cursor.insertText(line.mid(pos, range.first - pos), baseFormat);
+            cursor.insertText(line.mid(range.first, range.second - range.first), hitFormat);
+            pos = range.second;
+        }
+        if (pos < line.size())
+            cursor.insertText(line.mid(pos), baseFormat);
+        cursor.insertText(QStringLiteral("\n"), baseFormat);
+    }
+
+    if (!wroteAny)
+        return;
 
     if (autoScroll)
         m_view->verticalScrollBar()->setValue(m_view->verticalScrollBar()->maximum());
@@ -325,6 +436,32 @@ void ReceivePanel::onPauseToggled(bool paused)
 void ReceivePanel::onClearClicked()
 {
     clear();
+}
+
+void ReceivePanel::onFilterChanged()
+{
+    const bool ok = m_filter.setPattern(m_filterEdit->text(),
+                                         m_filterRegexButton->isChecked());
+    m_filterEdit->setProperty("error", !ok);
+    WidgetUtil::repolish(m_filterEdit);
+    if (!ok && m_filterEdit->isVisible()) {
+        m_filterEdit->setToolTip(tr("正则表达式无效，已按纯文本匹配"));
+    } else {
+        m_filterEdit->setToolTip(tr("只显示包含该关键词的行；命中片段会高亮"));
+    }
+    saveSettings();
+}
+
+void ReceivePanel::onFilterModeToggled(bool regex)
+{
+    Q_UNUSED(regex);
+    onFilterChanged();
+}
+
+void ReceivePanel::onShowControlCharsToggled(bool enabled)
+{
+    m_controlChars.setShowsAll(enabled);
+    saveSettings();
 }
 
 void ReceivePanel::onSaveClicked()

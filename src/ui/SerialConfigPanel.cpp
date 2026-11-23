@@ -1,8 +1,11 @@
 #include "ui/SerialConfigPanel.h"
 
+#include "ui/FlowLayout.h"
+#include "ui/WidgetUtil.h"
 #include "utils/SettingsManager.h"
 
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QCollator>
 #include <QComboBox>
 #include <QHBoxLayout>
@@ -14,6 +17,7 @@
 #include <QPushButton>
 #include <QSerialPortInfo>
 #include <QSet>
+#include <QSettings>
 #include <QStyle>
 #include <QToolButton>
 
@@ -30,9 +34,7 @@ QLabel *makeLabel(const QString &text, QWidget *parent)
 
 void repolish(QWidget *widget)
 {
-    widget->style()->unpolish(widget);
-    widget->style()->polish(widget);
-    widget->update();
+    WidgetUtil::repolish(widget);
 }
 
 QString normalizePortName(const QString &rawName)
@@ -159,6 +161,19 @@ SerialConfigPanel::SerialConfigPanel(QWidget *parent)
     connect(m_flowCombo, &QComboBox::currentIndexChanged, this,
             &SerialConfigPanel::saveSettings);
 
+    connect(m_dtrButton, &QToolButton::toggled, this, [this](bool on) {
+        emit dtrChanged(on);
+        saveSettings();
+    });
+    connect(m_rtsButton, &QToolButton::toggled, this, [this](bool on) {
+        emit rtsChanged(on);
+        saveSettings();
+    });
+    connect(m_autoReconnectCheck, &QCheckBox::toggled, this, [this](bool on) {
+        emit autoReconnectChanged(on);
+        saveSettings();
+    });
+
     updateOpenButtonState();
     updatePortToolTip();
 }
@@ -170,9 +185,11 @@ SerialConfigPanel::~SerialConfigPanel()
 
 void SerialConfigPanel::setupUi()
 {
-    auto *layout = new QHBoxLayout(this);
+    // 用 FlowLayout 让控件在窗口变窄时自动换行，避免把整行控件挤扁
+    auto *layout = new FlowLayout(this);
     layout->setContentsMargins(10, 6, 10, 6);
-    layout->setSpacing(8);
+    layout->setHorizontalSpacing(8);
+    layout->setVerticalSpacing(6);
 
     layout->addWidget(makeLabel(tr("串口"), this));
 
@@ -254,7 +271,29 @@ void SerialConfigPanel::setupUi()
     m_flowCombo->setToolTip(tr("无流控最常用；硬件为 RTS/CTS，软件为 XON/XOFF"));
     layout->addWidget(m_flowCombo);
 
-    layout->addStretch(1);
+    // ---- 控制线：DTR / RTS 手动置位与复位 ----
+    m_dtrButton = new QToolButton(this);
+    m_dtrButton->setObjectName(QStringLiteral("dtrButton"));
+    m_dtrButton->setText(tr("DTR"));
+    m_dtrButton->setCheckable(true);
+    m_dtrButton->setToolTip(
+        tr("置位 / 复位 DTR（数据终端就绪）。常用于复位设备或进入下载模式"));
+    layout->addWidget(m_dtrButton);
+
+    m_rtsButton = new QToolButton(this);
+    m_rtsButton->setObjectName(QStringLiteral("rtsButton"));
+    m_rtsButton->setText(tr("RTS"));
+    m_rtsButton->setCheckable(true);
+    m_rtsButton->setToolTip(
+        tr("置位 / 复位 RTS（请求发送）。常用于复位设备或切换收发方向"));
+    layout->addWidget(m_rtsButton);
+
+    // ---- 自动重连 ----
+    m_autoReconnectCheck = new QCheckBox(tr("自动重连"), this);
+    m_autoReconnectCheck->setObjectName(QStringLiteral("autoReconnectCheck"));
+    m_autoReconnectCheck->setToolTip(
+        tr("串口意外断开或设备复位后，自动按相同参数重新打开（间隔 2 秒）"));
+    layout->addWidget(m_autoReconnectCheck);
 
     m_openButton = new QPushButton(tr("打开串口"), this);
     m_openButton->setObjectName(QStringLiteral("openButton"));
@@ -557,10 +596,26 @@ void SerialConfigPanel::restoreSettings()
     const int flowIndex = m_flowCombo->findData(config.flowControl);
     if (flowIndex >= 0)
         m_flowCombo->setCurrentIndex(flowIndex);
+
+    // 控制线与自动重连单独存一组，避免混进串口参数
+    QSettings *s = SettingsManager::settings();
+    s->beginGroup(QStringLiteral("control"));
+    m_dtrButton->setChecked(s->value(QStringLiteral("dtr"), false).toBool());
+    m_rtsButton->setChecked(s->value(QStringLiteral("rts"), false).toBool());
+    m_autoReconnectCheck->setChecked(
+        s->value(QStringLiteral("autoReconnect"), false).toBool());
+    s->endGroup();
 }
 
 void SerialConfigPanel::saveSettings()
 {
+    QSettings *s = SettingsManager::settings();
+    s->beginGroup(QStringLiteral("control"));
+    s->setValue(QStringLiteral("dtr"), m_dtrButton->isChecked());
+    s->setValue(QStringLiteral("rts"), m_rtsButton->isChecked());
+    s->setValue(QStringLiteral("autoReconnect"), m_autoReconnectCheck->isChecked());
+    s->endGroup();
+
     if (m_connected || m_openPending)
         return;
 
@@ -582,6 +637,21 @@ void SerialConfigPanel::commitBaud()
     if (selectedBaudRate(&baud))
         m_committedBaud = baud;
     saveSettings();
+}
+
+bool SerialConfigPanel::dtrState() const
+{
+    return m_dtrButton->isChecked();
+}
+
+bool SerialConfigPanel::rtsState() const
+{
+    return m_rtsButton->isChecked();
+}
+
+bool SerialConfigPanel::autoReconnectEnabled() const
+{
+    return m_autoReconnectCheck->isChecked();
 }
 
 QString SerialConfigPanel::selectedPortName() const

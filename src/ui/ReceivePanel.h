@@ -1,6 +1,8 @@
 #pragma once
 
+#include "core/parser/ControlCharVisualizer.h"
 #include "core/parser/HexCodec.h"
+#include "core/parser/TextFilter.h"
 
 #include <QWidget>
 
@@ -8,6 +10,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QLineEdit;
 class QPlainTextEdit;
 class QToolButton;
 
@@ -45,6 +48,9 @@ private slots:
     void onPauseToggled(bool paused);
     void onClearClicked();
     void onSaveClicked();
+    void onFilterChanged();
+    void onFilterModeToggled(bool regex);
+    void onShowControlCharsToggled(bool enabled);
 
 private:
     void setupUi();
@@ -52,6 +58,7 @@ private:
     void saveSettings();
     void appendData(const QByteArray &data, bool tx);
     void insertText(const QString &text, const QColor &color);
+    void insertFilteredText(const QString &text, const QColor &color);
     void resetDecoder();
     QString chunkPrefix(bool tx) const;
 
@@ -62,6 +69,13 @@ private:
     QCheckBox *m_showTxCheck = nullptr;
     QToolButton *m_pauseButton = nullptr;
     QPlainTextEdit *m_view = nullptr;
+
+    // 过滤与不可见字符显示
+    QLineEdit *m_filterEdit = nullptr;
+    QToolButton *m_filterRegexButton = nullptr;
+    QCheckBox *m_showControlCharsCheck = nullptr;
+    TextFilter m_filter;
+    ControlCharVisualizer m_controlChars;
 
     std::unique_ptr<QTextCodec::ConverterState> m_decodeState;
     bool m_hexMode = false;

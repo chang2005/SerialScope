@@ -40,10 +40,14 @@ qt_standard_project_setup()
 add_library(serial_core STATIC
     src/core/SerialWorker.cpp
     src/core/DataLogger.cpp
+    src/core/QuickSend.cpp
+    src/core/AutoReply.cpp
     src/core/parser/HexCodec.cpp
     src/core/parser/AsciiValueParser.cpp
     src/core/parser/DataFrameParser.cpp
     src/core/parser/HexFieldExtractor.cpp
+    src/core/parser/TextFilter.cpp
+    src/core/parser/ControlCharVisualizer.cpp
     src/utils/CrcCalculator.cpp
     src/utils/SettingsManager.cpp
 )
@@ -64,7 +68,9 @@ qt_add_executable(SerialScope
     src/ui/WaveformPanel.cpp
     src/ui/PlotWidget.cpp
     src/ui/Theme.cpp
+    src/ui/FlowLayout.cpp
     src/ui/dialogs/AboutDialog.cpp
+    src/ui/dialogs/AutoReplyDialog.cpp
     src/ui/dialogs/CrcToolDialog.cpp
     src/ui/dialogs/HexFieldConfigDialog.cpp
     resources/app.qrc

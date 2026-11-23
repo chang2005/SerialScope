@@ -8,6 +8,7 @@
 #include "ui/Theme.h"
 #include "ui/WaveformPanel.h"
 #include "ui/dialogs/AboutDialog.h"
+#include "ui/dialogs/AutoReplyDialog.h"
 #include "ui/dialogs/CrcToolDialog.h"
 #include "utils/SettingsManager.h"
 
@@ -81,6 +82,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupThreads();
     setupConnections();
     restoreWindowState();
+    restoreAutoReplyRules();
     updateConnectionStatus();
     updateStatsLabels();
     updateLogLabel();
@@ -215,6 +217,15 @@ void MainWindow::setupToolbar()
     connect(m_crcAction, &QAction::triggered, this, &MainWindow::showCrcTool);
     toolsMenu->addAction(m_crcAction);
 
+    m_autoReplyAction = new QAction(style()->standardIcon(QStyle::SP_BrowserReload),
+                                    tr("自动回复规则…"), this);
+    m_autoReplyAction->setCheckable(true);
+    m_autoReplyAction->setChecked(true);
+    m_autoReplyAction->setToolTip(
+        tr("开启后，收到匹配的数据会自动回复预设内容（模拟从机设备）"));
+    connect(m_autoReplyAction, &QAction::toggled, this, &MainWindow::onAutoReplyToggled);
+    toolsMenu->addAction(m_autoReplyAction);
+
     m_themeAction = new QAction(style()->standardIcon(QStyle::SP_DesktopIcon),
                                 tr("深色模式"), this);
     m_themeAction->setCheckable(true);
@@ -236,6 +247,7 @@ void MainWindow::setupToolbar()
     toolbar->addAction(m_autoLogAction);
     toolbar->addSeparator();
     toolbar->addAction(m_crcAction);
+    toolbar->addAction(m_autoReplyAction);
     toolbar->addAction(m_themeAction);
     toolbar->addSeparator();
     toolbar->addAction(aboutAction);
@@ -267,6 +279,16 @@ void MainWindow::setupConnections()
             this, &MainWindow::onOpenRequested);
     connect(m_configPanel, &SerialConfigPanel::closeRequested,
             this, &MainWindow::onCloseRequested);
+    connect(m_configPanel, &SerialConfigPanel::dtrChanged,
+            m_worker, &SerialWorker::setDtr);
+    connect(m_configPanel, &SerialConfigPanel::rtsChanged,
+            m_worker, &SerialWorker::setRts);
+    connect(m_configPanel, &SerialConfigPanel::autoReconnectChanged,
+            m_worker, &SerialWorker::setAutoReconnect);
+    connect(m_worker, &SerialWorker::reconnectAttempted, this,
+            &MainWindow::onReconnectAttempted);
+    connect(m_worker, &SerialWorker::controlLinesChanged, this,
+            &MainWindow::onControlLinesChanged);
 
     connect(m_sendPanel, &SendPanel::dataToSend, m_worker, &SerialWorker::sendData);
     connect(m_sendPanel, &SendPanel::dataToSend, this, &MainWindow::onSendEcho);
@@ -383,6 +405,15 @@ void MainWindow::onOpenRequested(const SerialConfig &config)
     m_openPending = true;
     m_configPanel->setOpenPending(true);
     showStatus(tr("正在打开 %1…").arg(config.portName));
+
+    // 先把控制线与自动重连状态同步给工作线程，再打开端口
+    QMetaObject::invokeMethod(m_worker, "setAutoReconnect", Qt::QueuedConnection,
+                               Q_ARG(bool, m_configPanel->autoReconnectEnabled()));
+    QMetaObject::invokeMethod(m_worker, "setDtr", Qt::QueuedConnection,
+                               Q_ARG(bool, m_configPanel->dtrState()));
+    QMetaObject::invokeMethod(m_worker, "setRts", Qt::QueuedConnection,
+                               Q_ARG(bool, m_configPanel->rtsState()));
+
     if (!QMetaObject::invokeMethod(m_worker, "openPort", Qt::QueuedConnection,
                                    Q_ARG(SerialConfig, config))) {
         m_openPending = false;
@@ -466,8 +497,41 @@ void MainWindow::onPortLost(const QString &message)
     m_connLabel->setStyleSheet(QStringLiteral("color:#D1242F;font-weight:600;"));
     showStatus(tr("串口连接丢失：%1").arg(message));
 
+    // 开启自动重连时不弹模态框，避免打断恢复流程
+    if (m_configPanel && m_configPanel->autoReconnectEnabled()) {
+        m_receivePanel->appendSystemLine(tr("── 正在尝试自动重连… ──"));
+        return;
+    }
+
     QMessageBox::warning(this, tr("串口已断开"),
                          tr("串口连接已丢失：\n%1\n\n请检查设备连接后重新打开串口。").arg(message));
+}
+
+void MainWindow::onReconnectAttempted(int attempt, bool success, const QString &message)
+{
+    if (m_shuttingDown)
+        return;
+
+    if (success) {
+        m_receivePanel->appendSystemLine(
+            tr("── 自动重连成功（第 %1 次尝试） ──").arg(attempt));
+        showStatus(tr("串口已自动重连"));
+        return;
+    }
+
+    m_receivePanel->appendSystemLine(
+        tr("── 自动重连第 %1 次失败：%2 ──").arg(attempt).arg(message));
+}
+
+void MainWindow::onControlLinesChanged(bool dtr, bool rts)
+{
+    if (m_shuttingDown || !m_connLabel)
+        return;
+
+    const QString state = tr("DTR %1 · RTS %2")
+                              .arg(dtr ? tr("置位") : tr("复位"),
+                                   rts ? tr("置位") : tr("复位"));
+    m_connLabel->setToolTip(state);
 }
 
 void MainWindow::onErrorOccurred(const QString &message)
@@ -510,6 +574,19 @@ void MainWindow::handleIncomingData(const QByteArray &data)
     m_waveformPanel->feed(data);
     if (m_logger)
         m_logger->appendRx(data); // 未记录时内部直接返回
+
+    // 自动回复：收到匹配的数据后自动回一条预设内容
+    if (m_autoReplyEnabled && !m_autoReplyRules.isEmpty()) {
+        AutoReplyRule matched;
+        QByteArray reply;
+        if (m_autoReplyRules.match(data, &matched, &reply) && !reply.isEmpty()) {
+            QMetaObject::invokeMethod(m_worker, "sendData", Qt::QueuedConnection,
+                                      Q_ARG(QByteArray, reply));
+            m_receivePanel->appendSystemLine(
+                tr("── 自动回复（规则：%1）：%2 字节 ──")
+                    .arg(matched.name).arg(reply.size()));
+        }
+    }
 }
 
 void MainWindow::onSendEcho(const QByteArray &data)
@@ -724,6 +801,33 @@ void MainWindow::updateLogLabel()
     }
 }
 
+void MainWindow::saveAutoReplyRules()
+{
+    QSettings *s = SettingsManager::settings();
+    s->beginGroup(QStringLiteral("autoReply"));
+    s->setValue(QStringLiteral("rules"), m_autoReplyRules.toJson());
+    s->setValue(QStringLiteral("enabled"), m_autoReplyEnabled);
+    s->endGroup();
+    SettingsManager::save();
+}
+
+void MainWindow::restoreAutoReplyRules()
+{
+    QSettings *s = SettingsManager::settings();
+    s->beginGroup(QStringLiteral("autoReply"));
+    const QString json = s->value(QStringLiteral("rules")).toString();
+    m_autoReplyEnabled = s->value(QStringLiteral("enabled"), true).toBool();
+    s->endGroup();
+
+    if (!json.isEmpty())
+        m_autoReplyRules.fromJson(json);
+
+    if (m_autoReplyAction) {
+        QSignalBlocker blocker(m_autoReplyAction);
+        m_autoReplyAction->setChecked(m_autoReplyEnabled);
+    }
+}
+
 QString MainWindow::makeLogPath(const QString &portName) const
 {
     QString directory = SettingsManager::settings()
@@ -768,6 +872,28 @@ void MainWindow::showCrcTool()
 {
     CrcToolDialog dialog(this);
     dialog.exec();
+}
+
+void MainWindow::showAutoReplyRules()
+{
+    if (!m_autoReplyDialog) {
+        m_autoReplyDialog = new AutoReplyDialog(this);
+        connect(m_autoReplyDialog, &AutoReplyDialog::rulesChanged, this,
+                [this](const AutoReplyEngine &rules) {
+                    m_autoReplyRules = rules;
+                    saveAutoReplyRules();
+                });
+    }
+
+    m_autoReplyDialog->setRules(m_autoReplyRules);
+    m_autoReplyDialog->exec();
+}
+
+void MainWindow::onAutoReplyToggled(bool enabled)
+{
+    m_autoReplyEnabled = enabled;
+    saveAutoReplyRules();
+    showStatus(enabled ? tr("自动回复已开启") : tr("自动回复已关闭"));
 }
 
 void MainWindow::showAbout()
