@@ -102,13 +102,13 @@ SerialScope 是一个基于 **Qt 6 / C++17** 的桌面串口调试工具，面�
 从 [GitHub Releases](https://github.com/chang2005/SerialScope/releases) 下载：
 
 ```text
-SerialScope-1.0.0-win64.zip
+SerialScope-1.1.0-win64.zip
 ```
 
-解压后进入 `SerialScope-1.0.0-win64` 目录，直接运行 `SerialScope.exe`，无需安装，也不需要
+解压后进入 `SerialScope-1.1.0-win64` 目录，直接运行 `SerialScope.exe`，无需安装，也不需要
 管理员权限。发布包已包含 Qt 运行库和平台插件，可整体复制到其他 Windows 10/11 x64 机器使用。
 校验文件 `SHA256SUMS.txt` 随 Release 一并提供，可用
-`certutil -hashfile SerialScope-1.0.0-win64.zip SHA256` 核对。
+`certutil -hashfile SerialScope-1.1.0-win64.zip SHA256` 核对。
 
 > 当前构建使用 Qt 6.8.3 + MinGW 13.1，已在 Windows 11 上验证。Linux 和 macOS
 > 需要从源码构建。
@@ -204,7 +204,7 @@ cmake --build build --target package_release
 ```
 
 - `deploy`：复制程序、运行 `windeployqt`，并附带 README、LICENSE 和第三方声明。
-- `package_release`：生成 `build\release\SerialScope-1.0.0-win64.zip`。
+- `package_release`：生成 `build\release\SerialScope-1.1.0-win64.zip`。
 
 也可以直接执行：
 
@@ -234,16 +234,16 @@ LICENSES/               LGPLv3 与 Octicons MIT 许可证文本
 
 ## 版本与发布
 
-当前版本：**V1.0**（关于对话框显示 V1.0；Windows 文件版本与发布包使用 `1.0.0`）。
+当前版本：**V1.1**（关于对话框显示 V1.1；Windows 文件版本与发布包使用 `1.1.0`）。
 
 发布流程：
 
 ```bash
-git tag -a v1.0.0 -m "SerialScope v1.0.0"
+git tag -a v1.1.0 -m "SerialScope v1.1.0"
 git push origin main --tags
 ```
 
-然后把 `build/release/SerialScope-1.0.0-win64.zip` 上传到对应 GitHub Release。
+然后把 `build/release/SerialScope-1.1.0-win64.zip` 上传到对应 GitHub Release。
 
 ## 已知限制
 

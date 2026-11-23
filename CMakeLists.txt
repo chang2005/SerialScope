@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SerialScope VERSION 1.0.0 LANGUAGES CXX)
+project(SerialScope VERSION 1.1.0 LANGUAGES CXX)
 
 if(WIN32)
     # Keep clean MinGW builds working even when the toolchain directory is not

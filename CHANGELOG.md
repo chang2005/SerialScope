@@ -4,6 +4,8 @@ All notable changes to SerialScope are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-11-23
+
 ### Added
 
 - **接收区过滤**：关键词（纯文本，大小写不敏感）或正则表达式过滤，只显示命中的行，
